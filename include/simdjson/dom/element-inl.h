@@ -1,11 +1,18 @@
-#ifndef SIMDJSON_INLINE_ELEMENT_H
-#define SIMDJSON_INLINE_ELEMENT_H
+#ifndef SIMDJSON_ELEMENT_INL_H
+#define SIMDJSON_ELEMENT_INL_H
 
-#include "simdjson/dom/array.h"
+#include "simdjson/dom/base.h"
 #include "simdjson/dom/element.h"
+#include "simdjson/dom/document.h"
 #include "simdjson/dom/object.h"
-#include <cstring>
-#include <utility>
+#include "simdjson/internal/tape_type.h"
+
+#include "simdjson/dom/object-inl.h"
+#include "simdjson/error-inl.h"
+#include "simdjson/jsonpathutil.h"
+
+#include <ostream>
+#include <limits>
 
 namespace simdjson {
 
@@ -58,6 +65,12 @@ simdjson_inline simdjson_result<std::string_view> simdjson_result<dom::element>:
   if (error()) { return error(); }
   return first.get_string();
 }
+#if SIMDJSON_SUPPORTS_CHAR8_T
+simdjson_inline simdjson_result<std::u8string_view> simdjson_result<dom::element>::get_u8string() const noexcept {
+  if (error()) { return error(); }
+  return first.get_u8string();
+}
+#endif
 simdjson_inline simdjson_result<int64_t> simdjson_result<dom::element>::get_int64() const noexcept {
   if (error()) { return error(); }
   return first.get_int64();
@@ -73,6 +86,10 @@ simdjson_inline simdjson_result<double> simdjson_result<dom::element>::get_doubl
 simdjson_inline simdjson_result<bool> simdjson_result<dom::element>::get_bool() const noexcept {
   if (error()) { return error(); }
   return first.get_bool();
+}
+simdjson_inline simdjson_result<std::string_view> simdjson_result<dom::element>::get_bigint() const noexcept {
+  if (error()) { return error(); }
+  return first.get_bigint();
 }
 
 simdjson_inline bool simdjson_result<dom::element>::is_array() const noexcept {
@@ -103,6 +120,9 @@ simdjson_inline bool simdjson_result<dom::element>::is_bool() const noexcept {
 simdjson_inline bool simdjson_result<dom::element>::is_null() const noexcept {
   return !error() && first.is_null();
 }
+simdjson_inline bool simdjson_result<dom::element>::is_bigint() const noexcept {
+  return !error() && first.is_bigint();
+}
 
 simdjson_inline simdjson_result<dom::element> simdjson_result<dom::element>::operator[](std::string_view key) const noexcept {
   if (error()) { return error(); }
@@ -116,6 +136,18 @@ simdjson_inline simdjson_result<dom::element> simdjson_result<dom::element>::at_
   if (error()) { return error(); }
   return first.at_pointer(json_pointer);
 }
+simdjson_inline simdjson_result<dom::element> simdjson_result<dom::element>::at_path(const std::string_view json_path) const noexcept {
+  if (error()) { return error(); }
+  auto json_pointer = json_path_to_pointer_conversion(json_path);
+  if (json_pointer == "-1") { return INVALID_JSON_POINTER; }
+  return at_pointer(json_pointer);
+}
+
+simdjson_inline simdjson_result<std::vector<dom::element>> simdjson_result<dom::element>::at_path_with_wildcard(const std::string_view json_path) const noexcept {
+  if (error()) { return error(); }
+  return first.at_path_with_wildcard(json_path);
+}
+
 #ifndef SIMDJSON_DISABLE_DEPRECATED_API
 [[deprecated("For standard compliance, use at_pointer instead, and prefix your pointers with a slash '/', see RFC6901 ")]]
 simdjson_inline simdjson_result<dom::element> simdjson_result<dom::element>::at(const std::string_view json_pointer) const noexcept {
@@ -177,6 +209,72 @@ simdjson_inline dom::array::iterator simdjson_result<dom::element>::end() const 
 
 #endif // SIMDJSON_EXCEPTIONS
 
+namespace internal {
+// Appends the children of e, which must be an array or an object.
+inline void get_container_values(const dom::element &e, std::vector<dom::element> &out) noexcept {
+  dom::array a;
+  if (!e.get_array().get(a)) {
+    a.get_values(out);
+    return;
+  }
+  dom::object o;
+  if (!e.get_object().get(o)) {
+    o.get_values(out);
+  }
+}
+
+// Walks a pre-parsed wildcard path from e, which is at depth `step` of the
+// path. Errors below the starting node are skipped, not reported.
+inline simdjson_result<std::vector<dom::element>> at_wildcard_json_path(const dom::element &e, const wildcard_json_path &path, size_t step) noexcept {
+  // A finished path names this node, even when it is a scalar. Checking the
+  // container type first would drop keys such as "b*" and "foo*".
+  if (step == path.steps.size()) {
+    switch (path.tail) {
+      case wildcard_json_path::tail_type::all_values: {
+        std::vector<dom::element> children;
+        get_container_values(e, children);
+        return children;
+      }
+      case wildcard_json_path::tail_type::pointer: {
+        dom::element result;
+        auto error = e.at_pointer(path.tail_pointer).get(result);
+        if (error) {
+          return error;
+        }
+        return std::vector<dom::element>{std::move(result)};
+      }
+      default:
+        return INVALID_JSON_POINTER;
+    }
+  }
+  const dom::element_type t = e.type();
+  if (t != dom::element_type::ARRAY && t != dom::element_type::OBJECT) {
+    return std::vector<dom::element>{};
+  }
+  std::vector<dom::element> children;
+  const std::string &key_pointer = path.steps[step];
+  if (key_pointer == "/*") {
+    get_container_values(e, children);
+  } else {
+    dom::element child;
+    if (!e.at_pointer(key_pointer).get(child)) {
+      children.emplace_back(child);
+    }
+  }
+  std::vector<dom::element> result;
+  for (const dom::element &child : children) {
+    std::vector<dom::element> child_result;
+    if (at_wildcard_json_path(child, path, step + 1).get(child_result)) {
+      continue;
+    }
+    result.insert(result.end(),
+                  std::make_move_iterator(child_result.begin()),
+                  std::make_move_iterator(child_result.end()));
+  }
+  return result;
+}
+} // namespace internal
+
 namespace dom {
 
 //
@@ -199,6 +297,15 @@ inline simdjson_result<bool> element::get_bool() const noexcept {
     return false;
   }
   return INCORRECT_TYPE;
+}
+inline simdjson_result<std::string_view> element::get_bigint() const noexcept {
+  SIMDJSON_DEVELOPMENT_ASSERT(tape.usable());
+  switch (tape.tape_ref_type()) {
+    case internal::tape_type::BIGINT:
+      return tape.get_string_view();
+    default:
+      return INCORRECT_TYPE;
+  }
 }
 inline simdjson_result<const char *> element::get_c_str() const noexcept {
   SIMDJSON_DEVELOPMENT_ASSERT(tape.usable()); // https://github.com/simdjson/simdjson/issues/1914
@@ -229,6 +336,13 @@ inline simdjson_result<std::string_view> element::get_string() const noexcept {
       return INCORRECT_TYPE;
   }
 }
+#if SIMDJSON_SUPPORTS_CHAR8_T
+inline simdjson_result<std::u8string_view> element::get_u8string() const noexcept {
+  std::string_view v;
+  SIMDJSON_TRY(get_string().get(v));
+  return internal::as_u8string_view(v);
+}
+#endif
 inline simdjson_result<uint64_t> element::get_uint64() const noexcept {
   SIMDJSON_DEVELOPMENT_ASSERT(tape.usable()); // https://github.com/simdjson/simdjson/issues/1914
   if(simdjson_unlikely(!tape.is_uint64())) { // branch rarely taken
@@ -324,6 +438,9 @@ template<> inline simdjson_result<array> element::get<array>() const noexcept { 
 template<> inline simdjson_result<object> element::get<object>() const noexcept { return get_object(); }
 template<> inline simdjson_result<const char *> element::get<const char *>() const noexcept { return get_c_str(); }
 template<> inline simdjson_result<std::string_view> element::get<std::string_view>() const noexcept { return get_string(); }
+#if SIMDJSON_SUPPORTS_CHAR8_T
+template<> inline simdjson_result<std::u8string_view> element::get<std::u8string_view>() const noexcept { return get_u8string(); }
+#endif
 template<> inline simdjson_result<int64_t> element::get<int64_t>() const noexcept { return get_int64(); }
 template<> inline simdjson_result<uint64_t> element::get<uint64_t>() const noexcept { return get_uint64(); }
 template<> inline simdjson_result<double> element::get<double>() const noexcept { return get_double(); }
@@ -340,6 +457,10 @@ inline bool element::is_number() const noexcept { return is_int64() || is_uint64
 
 inline bool element::is_null() const noexcept {
   return tape.is_null_on_tape();
+}
+
+inline bool element::is_bigint() const noexcept {
+  return tape.tape_ref_type() == internal::tape_type::BIGINT;
 }
 
 #if SIMDJSON_EXCEPTIONS
@@ -369,6 +490,23 @@ inline simdjson_result<element> element::operator[](const char *key) const noexc
   return at_key(key);
 }
 
+inline bool is_pointer_well_formed(std::string_view json_pointer) noexcept {
+  if (simdjson_unlikely(json_pointer[0] != '/')) {
+    return false;
+  }
+  size_t escape = json_pointer.find('~');
+  if (escape == std::string_view::npos) {
+    return true;
+  }
+  if (escape == json_pointer.size() - 1) {
+    return false;
+  }
+  if (json_pointer[escape + 1] != '0' && json_pointer[escape + 1] != '1') {
+    return false;
+  }
+  return true;
+}
+
 inline simdjson_result<element> element::at_pointer(std::string_view json_pointer) const noexcept {
   SIMDJSON_DEVELOPMENT_ASSERT(tape.usable()); // https://github.com/simdjson/simdjson/issues/1914
   switch (tape.tape_ref_type()) {
@@ -377,7 +515,10 @@ inline simdjson_result<element> element::at_pointer(std::string_view json_pointe
     case internal::tape_type::START_ARRAY:
       return array(tape).at_pointer(json_pointer);
     default: {
-      if(!json_pointer.empty()) { // a non-empty string is invalid on an atom
+      if (!json_pointer.empty()) { // a non-empty string can be invalid, or accessing a primitive (issue 2154)
+        if (is_pointer_well_formed(json_pointer)) {
+          return NO_SUCH_FIELD;
+        }
         return INVALID_JSON_POINTER;
       }
       // an empty string means that we return the current node
@@ -385,6 +526,30 @@ inline simdjson_result<element> element::at_pointer(std::string_view json_pointe
       return simdjson_result<element>(std::move(copy));
     }
   }
+}
+
+inline simdjson_result<std::vector<element>> element::at_path_with_wildcard(std::string_view json_path) const noexcept {
+  SIMDJSON_DEVELOPMENT_ASSERT(tape.usable()); // https://github.com/simdjson/simdjson/issues/1914
+
+  const internal::wildcard_json_path path = internal::parse_wildcard_json_path(json_path);
+  // A path that cannot be parsed matches nothing, whatever the document: say
+  // so rather than letting the walk skip it as a mismatch below a wildcard.
+  if (path.tail == internal::wildcard_json_path::tail_type::invalid) {
+    return INVALID_JSON_POINTER;
+  }
+  switch (tape.tape_ref_type()) {
+    case internal::tape_type::START_OBJECT:
+    case internal::tape_type::START_ARRAY:
+      return internal::at_wildcard_json_path(*this, path, 0);
+    default:
+      return std::vector<element>{};
+  }
+}
+
+inline simdjson_result<element> element::at_path(std::string_view json_path) const noexcept {
+  auto json_pointer = json_path_to_pointer_conversion(json_path);
+  if (json_pointer == "-1") { return INVALID_JSON_POINTER; }
+  return at_pointer(json_pointer);
 }
 #ifndef SIMDJSON_DISABLE_DEPRECATED_API
 [[deprecated("For standard compliance, use at_pointer instead, and prefix your pointers with a slash '/', see RFC6901 ")]]
@@ -403,6 +568,12 @@ inline simdjson_result<element> element::at_key(std::string_view key) const noex
 }
 inline simdjson_result<element> element::at_key_case_insensitive(std::string_view key) const noexcept {
   return get<object>().at_key_case_insensitive(key);
+}
+inline bool element::operator<(const element &other) const noexcept {
+  return tape.json_index < other.tape.json_index;
+}
+inline bool element::operator==(const element &other) const noexcept {
+  return tape.json_index == other.tape.json_index;
 }
 
 inline bool element::dump_raw_tape(std::ostream &out) const noexcept {
@@ -429,6 +600,8 @@ inline std::ostream& operator<<(std::ostream& out, element_type type) {
       return out << "bool";
     case element_type::NULL_VALUE:
       return out << "null";
+    case element_type::BIGINT:
+      return out << "bigint";
     default:
       return out << "unexpected content!!!"; // abort() usage is forbidden in the library
   }
@@ -438,4 +611,4 @@ inline std::ostream& operator<<(std::ostream& out, element_type type) {
 
 } // namespace simdjson
 
-#endif // SIMDJSON_INLINE_ELEMENT_H
+#endif // SIMDJSON_ELEMENT_INL_H

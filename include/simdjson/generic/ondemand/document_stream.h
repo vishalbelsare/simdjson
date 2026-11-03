@@ -1,4 +1,13 @@
-#include "simdjson/error.h"
+#ifndef SIMDJSON_GENERIC_ONDEMAND_DOCUMENT_STREAM_H
+
+#ifndef SIMDJSON_CONDITIONAL_INCLUDE
+#define SIMDJSON_GENERIC_ONDEMAND_DOCUMENT_STREAM_H
+#include "simdjson/generic/ondemand/base.h"
+#include "simdjson/generic/implementation_simdjson_result_base.h"
+#include "simdjson/generic/ondemand/document.h"
+#include "simdjson/generic/ondemand/parser.h"
+#endif // SIMDJSON_CONDITIONAL_INCLUDE
+
 #ifdef SIMDJSON_THREADS_ENABLED
 #include <thread>
 #include <mutex>
@@ -8,10 +17,6 @@
 namespace simdjson {
 namespace SIMDJSON_IMPLEMENTATION {
 namespace ondemand {
-
-class parser;
-class json_iterator;
-class document;
 
 #ifdef SIMDJSON_THREADS_ENABLED
 /** @private Custom worker class **/
@@ -76,7 +81,7 @@ public:
   /**
    * Construct an uninitialized document_stream.
    *
-   *  ```c++
+   *  ```cpp
    *  document_stream docs;
    *  auto error = parser.iterate_many(json).get(docs);
    *  ```
@@ -111,26 +116,38 @@ public:
    *   }
    *   size_t truncated = stream.truncated_bytes();
    *
+   * IMPORTANT: this value is only meaningful under the conditions below.
+   *
+   *   - you iterated all the way to the end of the stream;
+   *   - no document reported an error. Iteration stops at the first failed
+   *     document, which can leave the bookkeeping from a mid-stream batch.
+   *
+   * If you need to know about a truncated tail outside those conditions, track
+   * it yourself from the last successful document (see iterator::current_index()
+   * and iterator::source()).
+   *
+   * An empty input (zero bytes) or an input made only of white space contains
+   * no document: truncated_bytes() returns zero.
    */
   inline size_t truncated_bytes() const noexcept;
 
   class iterator {
   public:
     using value_type = simdjson_result<document>;
-    using reference  = value_type;
-
+    using reference  = simdjson_result<ondemand::document_reference>;
+    using pointer    = void;
     using difference_type   = std::ptrdiff_t;
-
     using iterator_category = std::input_iterator_tag;
 
     /**
      * Default constructor.
      */
     simdjson_inline iterator() noexcept;
+    simdjson_inline iterator(const iterator &other) noexcept = default;
     /**
      * Get the current document (or error).
      */
-    simdjson_inline simdjson_result<ondemand::document_reference> operator*() noexcept;
+    simdjson_inline reference operator*() noexcept;
     /**
      * Advance to the next document (prefix).
      */
@@ -140,6 +157,7 @@ public:
      * @param other the end iterator to compare to.
      */
     simdjson_inline bool operator!=(const iterator &other) const noexcept;
+    simdjson_inline bool operator==(const iterator &other) const noexcept;
     /**
      * @private
      *
@@ -169,7 +187,10 @@ public:
      *
      * The returned string_view instance is simply a map to the (unparsed)
      * source string: it may thus include white-space characters and all manner
-     * of padding.
+     * of padding. It spans the whole current document, whether or not you
+     * have already accessed (part of) the document. Thus
+     * current_index() + source().size() is the offset just past the end of the
+     * current document, which is useful when reading a stream in chunks.
      *
      * This function (source()) is experimental and the usage
      * may change in future versions of simdjson: we find the API somewhat
@@ -183,6 +204,11 @@ public:
      */
      inline error_code error() const noexcept;
 
+     /**
+      * Returns whether the iterator is at the end.
+      */
+     inline bool at_end() const noexcept;
+
   private:
     simdjson_inline iterator(document_stream *s, bool finished) noexcept;
     /** The document_stream we're iterating through. */
@@ -194,6 +220,7 @@ public:
     friend class document_stream;
     friend class json_iterator;
   };
+  using iterator = document_stream::iterator;
 
   /**
    * Start iterating the documents in the stream.
@@ -217,13 +244,16 @@ private:
    * @param buf is the raw byte buffer we need to process
    * @param len is the length of the raw byte buffer in bytes
    * @param batch_size is the size of the windows (must be strictly greater or equal to the largest JSON document)
+   * @param allow_comma_separated whether to allow comma-separated documents
+   * @param format the stream format
    */
   simdjson_inline document_stream(
     ondemand::parser &parser,
     const uint8_t *buf,
     size_t len,
     size_t batch_size,
-    bool allow_comma_separated
+    bool allow_comma_separated,
+    stream_format format = stream_format::whitespace_delimited
   ) noexcept;
 
   /**
@@ -236,8 +266,7 @@ private:
    * Parse the next document found in the buffer previously given to document_stream.
    *
    * The content should be a valid JSON document encoded as UTF-8. If there is a
-   * UTF-8 BOM, the caller is responsible for omitting it, UTF-8 BOM are
-   * discouraged.
+   * UTF-8 BOM, the parser skips it.
    *
    * You do NOT need to pre-allocate a parser.  This function takes care of
    * pre-allocating a capacity defined by the batch_size defined when creating the
@@ -258,8 +287,23 @@ private:
    */
   inline void next() noexcept;
 
-  /** Move the json_iterator of the document to the location of the next document in the stream. */
+  /**
+   * Move the json_iterator of the document to the location of the next document
+   * in the stream.
+   *
+   * For formats with a document delimiter (`newline_delimited`, `json_sequence`),
+   * when the iterator is still inside the current document (`depth() > 0`), this
+   * may jump to the next delimiter instead of walking remaining structurals. That
+   * jump does not structure-validate the unread remainder.
+   */
   inline void next_document() noexcept;
+  /** Byte that ends a document under `format`, or 0 if there is none. */
+  simdjson_inline uint8_t document_delimiter() const noexcept;
+  /**
+   * Position the iterator at the first structural at or past the next
+   * `delimiter` in the current batch. Returns false if none is found.
+   */
+  simdjson_inline bool skip_to_delimiter(uint8_t delimiter) noexcept;
 
   /** Get the next document index. */
   inline size_t next_batch_start() const noexcept;
@@ -273,6 +317,7 @@ private:
   size_t len;
   size_t batch_size;
   bool allow_comma_separated;
+  stream_format format;
   /**
    * We are going to use just one document instance. The document owns
    * the json_iterator. It implies that we only ever pass a reference
@@ -299,7 +344,7 @@ private:
   /** The error returned from the stage 1 thread. */
   error_code stage1_thread_error{UNINITIALIZED};
   /** The thread used to run stage 1 against the next batch in the background. */
-  std::unique_ptr<stage1_worker> worker{new(std::nothrow) stage1_worker()};
+  std::unique_ptr<stage1_worker> worker{};
   /**
    * The parser used to run stage 1 in the background. Will be swapped
    * with the regular parser when finished.
@@ -313,7 +358,7 @@ private:
   friend class document;
   friend class json_iterator;
   friend struct simdjson_result<ondemand::document_stream>;
-  friend struct internal::simdjson_result_base<ondemand::document_stream>;
+  friend struct simdjson::internal::simdjson_result_base<ondemand::document_stream>;
 };  // document_stream
 
 } // namespace ondemand
@@ -330,3 +375,5 @@ public:
 };
 
 } // namespace simdjson
+
+#endif // SIMDJSON_GENERIC_ONDEMAND_DOCUMENT_STREAM_H

@@ -22,6 +22,25 @@ namespace number_tests {
     return true;
   }
 
+  bool issue2570() {
+    TEST_START();
+    auto json = R"([44.411101, 8.908021])"_padded;
+    simdjson::ondemand::parser parser;
+    simdjson::ondemand::document doc;
+    ASSERT_SUCCESS(parser.iterate(json).get(doc));
+    simdjson::ondemand::array arr;
+    ASSERT_SUCCESS(doc.get_array().get(arr));
+    std::vector<double> numbers = {44.411101, 8.908021};
+    size_t index = 0;
+    for (auto val : arr) {
+      double parsed;
+      ASSERT_SUCCESS(val.get_double().get(parsed));
+      ASSERT_EQUAL(parsed, numbers[index]);
+      index++;
+    }
+    TEST_SUCCEED();
+  }
+
   bool powers_of_two() {
     TEST_START();
 
@@ -211,7 +230,7 @@ namespace number_tests {
   bool get_number_tests() {
     TEST_START();
     ondemand::parser parser;
-    padded_string docdata = R"([1.0, 3, 1, 3.1415,-13231232,9999999999999999999,-9223372036854775807,-9223372036854775808])"_padded;
+    padded_string docdata = R"([1.0, 3, 1, 3.1415,-13231232,9999999999999999999,-9223372036854775807,-9223372036854775808,12345678901234567890123])"_padded;
     ondemand::number_type expectedtypes[] = {ondemand::number_type::floating_point_number,
                                  ondemand::number_type::signed_integer,
                                  ondemand::number_type::signed_integer,
@@ -219,10 +238,11 @@ namespace number_tests {
                                  ondemand::number_type::signed_integer,
                                  ondemand::number_type::unsigned_integer,
                                  ondemand::number_type::signed_integer,
-                                 ondemand::number_type::signed_integer
+                                 ondemand::number_type::signed_integer,
+                                 ondemand::number_type::big_integer
                                  };
-    bool is_negative[] = {false, false, false, false, true, false, true, true};
-    bool is_integer[] = {false, true, true, false, true, true, true, true};
+    bool is_negative[] = {false, false, false, false, true, false, true, true, false};
+    bool is_integer[] = {false, true, true, false, true, true, true, true, true};
 
     ondemand::document doc;
     ASSERT_SUCCESS(parser.iterate(docdata).get(doc));
@@ -233,17 +253,25 @@ namespace number_tests {
       ondemand::value val;
       ASSERT_SUCCESS(valr.get(val));
       ondemand::number_type nt{};
-      ASSERT_SUCCESS(val.get_number_type().get(nt));
+      auto r = val.get_number_type().get(nt);
+      ASSERT_SUCCESS(r);
       ASSERT_EQUAL(expectedtypes[counter], nt);
-      ondemand::number num;
-      ASSERT_SUCCESS(val.get_number().get(num));
-      ASSERT_EQUAL(is_negative[counter], val.is_negative());
       bool intvalue{};
-      ASSERT_SUCCESS(val.is_integer().get(intvalue));
+      auto res = val.is_integer().get(intvalue);
+      ASSERT_SUCCESS(res);
+      ondemand::number num;
+      auto rr = val.get_number().get(num);
+      if(counter == 8) {
+        ASSERT_EQUAL(rr, BIGINT_ERROR);
+        ASSERT_EQUAL(nt, ondemand::number_type::big_integer);
+      } else {
+        ASSERT_SUCCESS(rr);
+        ondemand::number_type t = num.get_number_type();
+        ASSERT_EQUAL(expectedtypes[counter], t);
+      }
       ASSERT_EQUAL(is_integer[counter], intvalue);
-      ondemand::number_type t = num.get_number_type();
-      ASSERT_EQUAL(expectedtypes[counter], t);
-      switch(t) {
+      ASSERT_EQUAL(is_negative[counter], val.is_negative());
+      switch(nt) {
         case ondemand::number_type::signed_integer:
           ASSERT_TRUE(num.is_int64());
           break;
@@ -253,28 +281,78 @@ namespace number_tests {
         case ondemand::number_type::floating_point_number:
           ASSERT_TRUE(num.is_double());
           break;
+        case ondemand::number_type::big_integer:
+          break;
       }
-      if(counter == 0) {
-        ASSERT_EQUAL(num.get_double(), 1.0);
-        ASSERT_EQUAL((double)num, 1.0);
-      } else if(counter == 1) {
-        ASSERT_EQUAL(num.get_int64(), 3);
-        ASSERT_EQUAL((int64_t)num, 3);
-      } else if(counter == 2) {
-        ASSERT_EQUAL(num.get_int64(), 1);
-        ASSERT_EQUAL((int64_t)num, 1);
-      } else if(counter == 3) {
-        ASSERT_EQUAL(num.get_double(), 3.1415);
-        ASSERT_EQUAL((double)num, 3.1415);
-      } else if(counter == 4) {
-        ASSERT_EQUAL(num.get_int64(), -13231232);
-        ASSERT_EQUAL((int64_t)num, -13231232);
-      } else if(counter == 5) {
-        ASSERT_EQUAL(num.get_uint64(), UINT64_C(9999999999999999999));
-        ASSERT_EQUAL((uint64_t)num, UINT64_C(9999999999999999999));
+      switch(counter) {
+        case 0:
+          ASSERT_EQUAL(num.get_double(), 1.0);
+          ASSERT_EQUAL((double)num, 1.0);
+          break;
+        case 1:
+          ASSERT_EQUAL(num.get_int64(), 3);
+          ASSERT_EQUAL((int64_t)num, 3);
+          break;
+        case 2:
+          ASSERT_EQUAL(num.get_int64(), 1);
+          ASSERT_EQUAL((int64_t)num, 1);
+          break;
+        case 3:
+          ASSERT_EQUAL(num.get_double(), 3.1415);
+          ASSERT_EQUAL((double)num, 3.1415);
+          break;
+        case 4:
+          ASSERT_EQUAL(num.get_int64(), -13231232);
+          ASSERT_EQUAL((int64_t)num, -13231232);
+          break;
+        case 5:
+          ASSERT_EQUAL(num.get_uint64(), UINT64_C(9999999999999999999));
+          ASSERT_EQUAL((uint64_t)num, UINT64_C(9999999999999999999));
+          break;
+        case 8:
+          ASSERT_EQUAL(val.raw_json_token(), "12345678901234567890123");
+          break;
+        default:
+          break;
       }
       counter++;
     }
+    TEST_SUCCEED();
+  }
+
+  bool issue2099() {
+    TEST_START();
+    ondemand::parser parser;
+    auto json = "1000000000.000000001"_padded;
+    ondemand::document doc;
+    ASSERT_SUCCESS(parser.iterate(json).get(doc));
+    ondemand::number number;
+    ASSERT_SUCCESS(doc.get_number().get(number));
+    ASSERT_EQUAL(number.get_number_type(), ondemand::number_type::floating_point_number);
+    ASSERT_EQUAL(number.get_double(), 1e9);
+    TEST_SUCCEED();
+  }
+
+  bool minus_zero() {
+    TEST_START();
+    ondemand::parser parser;
+    auto json = "-0"_padded;
+    ondemand::document doc;
+    ASSERT_SUCCESS(parser.iterate(json).get(doc));
+    ondemand::number number;
+    ASSERT_SUCCESS(doc.get_number().get(number));
+    #if SIMDJSON_MINUS_ZERO_AS_FLOAT
+    ASSERT_EQUAL(number.get_number_type(), ondemand::number_type::floating_point_number);
+    #else
+    ASSERT_EQUAL(number.get_number_type(), ondemand::number_type::signed_integer);
+    #endif
+    ondemand::number_type nt{};
+    ASSERT_SUCCESS(doc.get_number_type().get(nt));
+    #if SIMDJSON_MINUS_ZERO_AS_FLOAT
+    ASSERT_EQUAL(nt, ondemand::number_type::floating_point_number);
+    #else
+    ASSERT_EQUAL(nt, ondemand::number_type::signed_integer);
+    #endif
     TEST_SUCCEED();
   }
 
@@ -391,6 +469,7 @@ namespace number_tests {
 
     TEST_SUCCEED();
   }
+
   bool issue2017() {
     TEST_START();
     ondemand::parser parser;
@@ -403,16 +482,633 @@ namespace number_tests {
     TEST_SUCCEED();
   }
 
+  bool issue2045() {
+    TEST_START();
+    ondemand::parser parser;
+    ondemand::document doc;
+    padded_string docdata = R"(-18446744073709551615)"_padded;
+    ASSERT_SUCCESS(parser.iterate(docdata).get(doc));
+    int64_t bigint;
+    ASSERT_ERROR(doc.get_int64().get(bigint), INCORRECT_TYPE);
+    TEST_SUCCEED();
+  }
+
+
+  bool issue2093() {
+    TEST_START();
+    ondemand::parser parser;
+    ondemand::document doc;
+    padded_string docdata = R"(0.95000000000000000000)"_padded;
+    ASSERT_SUCCESS(parser.iterate(docdata).get(doc));
+    double d;
+    ASSERT_SUCCESS(doc.get_double().get(d));
+    ASSERT_EQUAL(d, 0.95);
+    TEST_SUCCEED();
+  }
+
+  bool big_int_not_zero() {
+    TEST_START();
+    ondemand::parser parser;
+    ondemand::document doc;
+    // This is not a big integer, it is a mistake
+    padded_string docdata = R"(09500000000000000000000000000000000000)"_padded;
+    ASSERT_SUCCESS(parser.iterate(docdata).get(doc));
+    ASSERT_ERROR(doc.get_number(), NUMBER_ERROR);
+    TEST_SUCCEED();
+  }
+
+  bool positive_big_int() {
+    TEST_START();
+    ondemand::parser parser;
+    ondemand::document doc;
+    padded_string docdata = R"(18446744073709551616)"_padded;
+    ASSERT_SUCCESS(parser.iterate(docdata).get(doc));
+    ASSERT_ERROR(doc.get_number(), BIGINT_ERROR);
+    std::string_view my_big;
+    ASSERT_SUCCESS(doc.raw_json_token().get(my_big));
+    ASSERT_EQUAL(my_big, "18446744073709551616");
+    TEST_SUCCEED();
+  }
+
+  bool negative_big_int() {
+    TEST_START();
+    ondemand::parser parser;
+    ondemand::document doc;
+    // This is not a big integer, it is a mistake
+    padded_string docdata = R"(-18446744073709551616)"_padded;
+    ASSERT_SUCCESS(parser.iterate(docdata).get(doc));
+    ASSERT_ERROR(doc.get_number(), BIGINT_ERROR);
+    std::string_view my_big;
+    ASSERT_SUCCESS(doc.raw_json_token().get(my_big));
+    ASSERT_EQUAL(my_big, "-18446744073709551616");
+    TEST_SUCCEED();
+  }
+
+  bool gigantic_big_int() {
+    TEST_START();
+    ondemand::parser parser;
+    ondemand::document doc;
+    std::string number(2000, '1');
+    // This is not a big integer, it is a mistake
+    ASSERT_SUCCESS(parser.iterate(number).get(doc));
+    ASSERT_ERROR(doc.get_number(), BIGINT_ERROR);
+    std::string_view my_big;
+    ASSERT_SUCCESS(doc.raw_json_token().get(my_big));
+    ASSERT_EQUAL(my_big, number);
+    TEST_SUCCEED();
+  }
+
+  bool get_int32_values() {
+    TEST_START();
+    ondemand::parser parser;
+    ondemand::document doc;
+    int32_t val;
+    padded_string docdata;
+
+    // Valid int32 values
+    docdata = "0"_padded;
+    ASSERT_SUCCESS(parser.iterate(docdata).get(doc));
+    ASSERT_SUCCESS(doc.get_int32().get(val));
+    ASSERT_EQUAL(val, 0);
+
+    docdata = "42"_padded;
+    ASSERT_SUCCESS(parser.iterate(docdata).get(doc));
+    ASSERT_SUCCESS(doc.get_int32().get(val));
+    ASSERT_EQUAL(val, 42);
+
+    docdata = "-1"_padded;
+    ASSERT_SUCCESS(parser.iterate(docdata).get(doc));
+    ASSERT_SUCCESS(doc.get_int32().get(val));
+    ASSERT_EQUAL(val, -1);
+
+    docdata = "2147483647"_padded; // INT32_MAX
+    ASSERT_SUCCESS(parser.iterate(docdata).get(doc));
+    ASSERT_SUCCESS(doc.get_int32().get(val));
+    ASSERT_EQUAL(val, 2147483647);
+
+    docdata = "-2147483648"_padded; // INT32_MIN
+    ASSERT_SUCCESS(parser.iterate(docdata).get(doc));
+    ASSERT_SUCCESS(doc.get_int32().get(val));
+    ASSERT_EQUAL(val, -2147483648);
+
+    // Out of range
+    docdata = "2147483648"_padded; // INT32_MAX + 1
+    ASSERT_SUCCESS(parser.iterate(docdata).get(doc));
+    ASSERT_ERROR(doc.get_int32(), NUMBER_OUT_OF_RANGE);
+
+    docdata = "-2147483649"_padded; // INT32_MIN - 1
+    ASSERT_SUCCESS(parser.iterate(docdata).get(doc));
+    ASSERT_ERROR(doc.get_int32(), NUMBER_OUT_OF_RANGE);
+
+    docdata = "9999999999"_padded;
+    ASSERT_SUCCESS(parser.iterate(docdata).get(doc));
+    ASSERT_ERROR(doc.get_int32(), NUMBER_OUT_OF_RANGE);
+
+    // Test via value path
+    auto json = R"({"x": 42})"_padded;
+    ASSERT_SUCCESS(parser.iterate(json).get(doc));
+    ASSERT_SUCCESS(doc["x"].get_int32().get(val));
+    ASSERT_EQUAL(val, 42);
+
+    TEST_SUCCEED();
+  }
+
+  bool get_uint32_values() {
+    TEST_START();
+    ondemand::parser parser;
+    ondemand::document doc;
+    uint32_t val;
+    padded_string docdata;
+
+    // Valid uint32 values
+    docdata = "0"_padded;
+    ASSERT_SUCCESS(parser.iterate(docdata).get(doc));
+    ASSERT_SUCCESS(doc.get_uint32().get(val));
+    ASSERT_EQUAL(val, 0u);
+
+    docdata = "42"_padded;
+    ASSERT_SUCCESS(parser.iterate(docdata).get(doc));
+    ASSERT_SUCCESS(doc.get_uint32().get(val));
+    ASSERT_EQUAL(val, 42u);
+
+    docdata = "4294967295"_padded; // UINT32_MAX
+    ASSERT_SUCCESS(parser.iterate(docdata).get(doc));
+    ASSERT_SUCCESS(doc.get_uint32().get(val));
+    ASSERT_EQUAL(val, 4294967295u);
+
+    // Out of range
+    docdata = "4294967296"_padded; // UINT32_MAX + 1
+    ASSERT_SUCCESS(parser.iterate(docdata).get(doc));
+    ASSERT_ERROR(doc.get_uint32(), NUMBER_OUT_OF_RANGE);
+
+    docdata = "9999999999"_padded;
+    ASSERT_SUCCESS(parser.iterate(docdata).get(doc));
+    ASSERT_ERROR(doc.get_uint32(), NUMBER_OUT_OF_RANGE);
+
+    // Negative values should fail (get_uint64 will fail with INCORRECT_TYPE)
+    docdata = "-1"_padded;
+    ASSERT_SUCCESS(parser.iterate(docdata).get(doc));
+    ASSERT_ERROR(doc.get_uint32(), INCORRECT_TYPE);
+
+    // Test via value path
+    auto json = R"({"x": 42})"_padded;
+    ASSERT_SUCCESS(parser.iterate(json).get(doc));
+    ASSERT_SUCCESS(doc["x"].get_uint32().get(val));
+    ASSERT_EQUAL(val, 42u);
+
+    TEST_SUCCEED();
+  }
+
+  // get_uint16(), get_int16(), get_uint8() and get_int8() all range-check the
+  // result of get_uint64() / get_int64(). narrow_getter<T> names the getter for
+  // T so that one checker can walk every access path for every type.
+  template <typename T> struct narrow_getter;
+#define SIMDJSON_NARROW_GETTER(T, NAME) \
+  template <> struct narrow_getter<T> { \
+    template <typename V> static simdjson_result<T> get(V &&v) { return v.NAME(); } \
+  };
+  SIMDJSON_NARROW_GETTER(uint16_t, get_uint16)
+  SIMDJSON_NARROW_GETTER(int16_t, get_int16)
+  SIMDJSON_NARROW_GETTER(uint8_t, get_uint8)
+  SIMDJSON_NARROW_GETTER(int8_t, get_int8)
+#undef SIMDJSON_NARROW_GETTER
+
+  // Checks the outcome of one access: either 'error', or success with 'expected'
+  // (compared as int64_t so that failures print as numbers, not characters).
+  template <typename T>
+  bool check_outcome(error_code e, const T &val, int64_t expected, error_code error) {
+    if (error) {
+      ASSERT_ERROR(e, error);
+    } else {
+      ASSERT_SUCCESS(e);
+      ASSERT_EQUAL(int64_t(val), expected);
+    }
+    return true;
+  }
+
+  // Checks that 'number' parses as T with the given value, or fails with 'error',
+  // through every access path.
+  template <typename T>
+  bool check_narrow_integer(const std::string &number, int64_t expected, error_code error = SUCCESS) {
+    std::cout << "  " << number << " -> " << (error ? error_message(error) : std::to_string(expected)) << std::endl;
+    ondemand::parser parser;
+    ondemand::document doc;
+    T val{};
+    padded_string root(number);
+
+    // document: get_*(), get<T>(), get(T&), then simdjson_result<document>
+    ASSERT_SUCCESS(parser.iterate(root).get(doc));
+    ASSERT_TRUE(check_outcome(narrow_getter<T>::get(doc).get(val), val, expected, error));
+    ASSERT_SUCCESS(parser.iterate(root).get(doc));
+    ASSERT_TRUE(check_outcome(doc.get<T>().get(val), val, expected, error));
+    ASSERT_SUCCESS(parser.iterate(root).get(doc));
+    ASSERT_TRUE(check_outcome(doc.get(val), val, expected, error));
+    ASSERT_TRUE(check_outcome(narrow_getter<T>::get(parser.iterate(root)).get(val), val, expected, error));
+
+    // value: simdjson_result<value>, then value::get_*(), get<T>() and get(T&)
+    padded_string array_data("[" + number + "," + number + "," + number + "," + number + "]");
+    ASSERT_SUCCESS(parser.iterate(array_data).get(doc));
+    ondemand::array arr;
+    ASSERT_SUCCESS(doc.get_array().get(arr));
+    size_t i = 0;
+    for (auto element : arr) {
+      error_code e;
+      if (i == 0) {
+        e = narrow_getter<T>::get(element).get(val);
+      } else {
+        ondemand::value v;
+        ASSERT_SUCCESS(element.get(v));
+        if (i == 1) {
+          e = narrow_getter<T>::get(v).get(val);
+        } else if (i == 2) {
+          e = v.get<T>().get(val);
+        } else {
+          e = v.get(val);
+        }
+      }
+      ASSERT_TRUE(check_outcome(e, val, expected, error));
+      i++;
+    }
+    ASSERT_EQUAL(i, 4);
+
+    // document_reference: the next document is not trailing content.
+    padded_string stream_data(number + " " + number);
+    ondemand::document_stream stream;
+    ASSERT_SUCCESS(parser.iterate_many(stream_data).get(stream));
+    i = 0;
+    for (auto d : stream) {
+      error_code e;
+      if (i == 0) {
+        e = narrow_getter<T>::get(d).get(val); // simdjson_result<document_reference>
+      } else {
+        ondemand::document_reference ref;
+        ASSERT_SUCCESS(d.get(ref));
+        e = ref.get<T>().get(val);
+      }
+      ASSERT_TRUE(check_outcome(e, val, expected, error));
+      i++;
+    }
+    ASSERT_EQUAL(i, 2);
+    return true;
+  }
+
+  // Inputs that every narrow getter must reject the same way.
+  template <typename T>
+  bool check_narrow_integer_wrong_type() {
+    return check_narrow_integer<T>("1.0", 0, INCORRECT_TYPE) &&
+           check_narrow_integer<T>("1e2", 0, INCORRECT_TYPE) &&
+           check_narrow_integer<T>("\"12\"", 0, INCORRECT_TYPE) &&
+           check_narrow_integer<T>("true", 0, INCORRECT_TYPE) &&
+           check_narrow_integer<T>("null", 0, INCORRECT_TYPE) &&
+           check_narrow_integer<T>("[1]", 0, INCORRECT_TYPE) &&
+           check_narrow_integer<T>("{}", 0, INCORRECT_TYPE);
+  }
+
+  bool get_uint16_values() {
+    TEST_START();
+    ASSERT_TRUE(check_narrow_integer<uint16_t>("0", 0));
+    ASSERT_TRUE(check_narrow_integer<uint16_t>("42", 42));
+    ASSERT_TRUE(check_narrow_integer<uint16_t>("65535", 65535));
+    ASSERT_TRUE(check_narrow_integer<uint16_t>("65536", 0, NUMBER_OUT_OF_RANGE));
+    ASSERT_TRUE(check_narrow_integer<uint16_t>("4294967296", 0, NUMBER_OUT_OF_RANGE));
+    ASSERT_TRUE(check_narrow_integer<uint16_t>("18446744073709551615", 0, NUMBER_OUT_OF_RANGE));
+    ASSERT_TRUE(check_narrow_integer<uint16_t>("-1", 0, INCORRECT_TYPE));
+    ASSERT_TRUE(check_narrow_integer_wrong_type<uint16_t>());
+    TEST_SUCCEED();
+  }
+
+  bool get_int16_values() {
+    TEST_START();
+    ASSERT_TRUE(check_narrow_integer<int16_t>("0", 0));
+    ASSERT_TRUE(check_narrow_integer<int16_t>("-1", -1));
+    ASSERT_TRUE(check_narrow_integer<int16_t>("32767", 32767));
+    ASSERT_TRUE(check_narrow_integer<int16_t>("-32768", -32768));
+    ASSERT_TRUE(check_narrow_integer<int16_t>("32768", 0, NUMBER_OUT_OF_RANGE));
+    ASSERT_TRUE(check_narrow_integer<int16_t>("-32769", 0, NUMBER_OUT_OF_RANGE));
+    ASSERT_TRUE(check_narrow_integer<int16_t>("65535", 0, NUMBER_OUT_OF_RANGE));
+    ASSERT_TRUE(check_narrow_integer<int16_t>("9223372036854775807", 0, NUMBER_OUT_OF_RANGE));
+    ASSERT_TRUE(check_narrow_integer<int16_t>("-9223372036854775808", 0, NUMBER_OUT_OF_RANGE));
+    ASSERT_TRUE(check_narrow_integer_wrong_type<int16_t>());
+    TEST_SUCCEED();
+  }
+
+  bool get_uint8_values() {
+    TEST_START();
+    ASSERT_TRUE(check_narrow_integer<uint8_t>("0", 0));
+    ASSERT_TRUE(check_narrow_integer<uint8_t>("42", 42));
+    ASSERT_TRUE(check_narrow_integer<uint8_t>("255", 255));
+    ASSERT_TRUE(check_narrow_integer<uint8_t>("256", 0, NUMBER_OUT_OF_RANGE));
+    ASSERT_TRUE(check_narrow_integer<uint8_t>("65536", 0, NUMBER_OUT_OF_RANGE));
+    ASSERT_TRUE(check_narrow_integer<uint8_t>("18446744073709551615", 0, NUMBER_OUT_OF_RANGE));
+    ASSERT_TRUE(check_narrow_integer<uint8_t>("-1", 0, INCORRECT_TYPE));
+    ASSERT_TRUE(check_narrow_integer_wrong_type<uint8_t>());
+    TEST_SUCCEED();
+  }
+
+  bool get_int8_values() {
+    TEST_START();
+    ASSERT_TRUE(check_narrow_integer<int8_t>("0", 0));
+    ASSERT_TRUE(check_narrow_integer<int8_t>("-1", -1));
+    ASSERT_TRUE(check_narrow_integer<int8_t>("127", 127));
+    ASSERT_TRUE(check_narrow_integer<int8_t>("-128", -128));
+    ASSERT_TRUE(check_narrow_integer<int8_t>("128", 0, NUMBER_OUT_OF_RANGE));
+    ASSERT_TRUE(check_narrow_integer<int8_t>("-129", 0, NUMBER_OUT_OF_RANGE));
+    ASSERT_TRUE(check_narrow_integer<int8_t>("255", 0, NUMBER_OUT_OF_RANGE));
+    ASSERT_TRUE(check_narrow_integer<int8_t>("-9223372036854775808", 0, NUMBER_OUT_OF_RANGE));
+    ASSERT_TRUE(check_narrow_integer_wrong_type<int8_t>());
+    TEST_SUCCEED();
+  }
+
+  // A root-level number long enough that its digits reach the end of the
+  // on-stack scratch buffer that get_root_double() and friends copy it into.
+  // The digit scan in numberparsing reads eight bytes at a time and counts on
+  // SIMDJSON_PADDING bytes past the last digit, which the document buffer has
+  // and the scratch buffer did not: the scan ran off the end of the buffer
+  // (an -fsanitize=address stack-buffer-overflow).
+  bool root_number_scratch_padding() {
+    TEST_START();
+    for (size_t len = 1070; len <= 1090; len++) {
+      std::string text = "-0.";
+      text.append(len - text.size(), '1');
+      ASSERT_EQUAL(text.size(), len);
+      simdjson::padded_string json(text);
+      simdjson::padded_string quoted("\"" + text + "\"");
+
+      // Each root-number accessor copies into its own such buffer. Too many
+      // digits to be representable, so the value is rejected either way; what
+      // matters is that deciding that stays inside the buffer.
+      {
+        simdjson::ondemand::parser parser;
+        simdjson::ondemand::document doc;
+        ASSERT_SUCCESS(parser.iterate(json).get(doc));
+        double v;
+        auto error = doc.get_double().get(v);
+        if (error != SUCCESS && error != NUMBER_ERROR) { ASSERT_SUCCESS(error); }
+        if (error == SUCCESS) { ASSERT_TRUE(v < 0 && v > -1); }
+      }
+      {
+        simdjson::ondemand::parser parser;
+        simdjson::ondemand::document doc;
+        ASSERT_SUCCESS(parser.iterate(json).get(doc));
+        float v;
+        auto error = doc.get_float().get(v);
+        if (error != SUCCESS && error != NUMBER_ERROR) { ASSERT_SUCCESS(error); }
+      }
+      {
+        simdjson::ondemand::parser parser;
+        simdjson::ondemand::document doc;
+        ASSERT_SUCCESS(parser.iterate(json).get(doc));
+        simdjson::ondemand::number num;
+        auto error = doc.get_number().get(num);
+        if (error != SUCCESS && error != NUMBER_ERROR) { ASSERT_SUCCESS(error); }
+      }
+      {
+        simdjson::ondemand::parser parser;
+        simdjson::ondemand::document doc;
+        ASSERT_SUCCESS(parser.iterate(json).get(doc));
+        simdjson::ondemand::number_type type;
+        auto error = doc.get_number_type().get(type);
+        if (error != SUCCESS && error != NUMBER_ERROR) { ASSERT_SUCCESS(error); }
+      }
+      {
+        simdjson::ondemand::parser parser;
+        simdjson::ondemand::document doc;
+        ASSERT_SUCCESS(parser.iterate(quoted).get(doc));
+        double v;
+        auto error = doc.get_double_in_string().get(v);
+        if (error != SUCCESS && error != NUMBER_ERROR) { ASSERT_SUCCESS(error); }
+      }
+      {
+        simdjson::ondemand::parser parser;
+        simdjson::ondemand::document doc;
+        ASSERT_SUCCESS(parser.iterate(quoted).get(doc));
+        float v;
+        auto error = doc.get_float_in_string().get(v);
+        if (error != SUCCESS && error != NUMBER_ERROR) { ASSERT_SUCCESS(error); }
+      }
+    }
+    TEST_SUCCEED();
+  }
+
+  bool root_number_trailing_whitespace() {
+    TEST_START();
+    // More whitespace after the number than the root accessors' scratch
+    // buffers can hold: it must not count toward the length of the number.
+    const std::string spaces(2000, ' ');
+    simdjson::padded_string json("-42" + spaces);
+    simdjson::padded_string quoted("\"42\"" + spaces);
+    simdjson::ondemand::parser parser;
+    simdjson::ondemand::document doc;
+    int64_t i;
+    uint64_t u;
+    double d;
+    bool is_integer;
+    // GCC 11 -Werror=maybe-uninitialized cannot see that get() writes this
+    // before ASSERT_EQUAL streams it through operator<<.
+    simdjson::ondemand::number_type type{};
+    simdjson::ondemand::number num;
+    ASSERT_SUCCESS(parser.iterate(json).get(doc));
+    ASSERT_SUCCESS(doc.get_int64().get(i));
+    ASSERT_EQUAL(i, -42);
+    ASSERT_SUCCESS(parser.iterate(json).get(doc));
+    ASSERT_SUCCESS(doc.get_double().get(d));
+    ASSERT_EQUAL(d, -42.0);
+    ASSERT_SUCCESS(parser.iterate(json).get(doc));
+    ASSERT_SUCCESS(doc.is_integer().get(is_integer));
+    ASSERT_TRUE(is_integer);
+    ASSERT_SUCCESS(parser.iterate(json).get(doc));
+    ASSERT_SUCCESS(doc.get_number_type().get(type));
+    ASSERT_EQUAL(type, simdjson::ondemand::number_type::signed_integer);
+    ASSERT_SUCCESS(parser.iterate(json).get(doc));
+    ASSERT_SUCCESS(doc.get_number().get(num));
+    ASSERT_EQUAL(num.get_int64(), -42);
+    ASSERT_SUCCESS(parser.iterate(quoted).get(doc));
+    ASSERT_SUCCESS(doc.get_uint64_in_string().get(u));
+    ASSERT_EQUAL(u, 42);
+    // The whitespace between two documents of a stream counts the same way.
+    simdjson::padded_string stream_json("1" + spaces + "2");
+    simdjson::ondemand::document_stream stream;
+    ASSERT_SUCCESS(parser.iterate_many(stream_json).get(stream));
+    int64_t expected = 0;
+    for (auto d_ref : stream) {
+      ASSERT_SUCCESS(d_ref.get_int64().get(i));
+      ASSERT_EQUAL(i, ++expected);
+    }
+    ASSERT_EQUAL(expected, 2);
+    TEST_SUCCEED();
+  }
+
+  bool root_number_stream_delimiters() {
+    TEST_START();
+    // Stage 1 drops the comma or RS from the structural index, but
+    // peek_root_length() still includes it. More separator-side padding than
+    // the scratch buffer holds must not be reported as NUMBER_ERROR, and an
+    // RS glued to the digits is not a valid number finisher.
+    simdjson::ondemand::parser parser;
+    simdjson::ondemand::document_stream stream;
+    const std::string gap(30, ' ');
+    const std::string long_gap(2000, ' ');
+    int64_t i;
+    double d;
+    uint64_t u;
+
+    simdjson::padded_string comma_gap("1" + gap + ",2");
+    ASSERT_SUCCESS(parser.iterate_many(comma_gap, comma_gap.size(), stream_format::comma_delimited).get(stream));
+    int64_t expected = 0;
+    for (auto doc : stream) {
+      ASSERT_SUCCESS(doc.get_int64().get(i));
+      ASSERT_EQUAL(i, ++expected);
+    }
+    ASSERT_EQUAL(expected, 2);
+
+    simdjson::padded_string comma_tight(std::string("1,2"));
+    ASSERT_SUCCESS(parser.iterate_many(comma_tight, comma_tight.size(), stream_format::comma_delimited).get(stream));
+    expected = 0;
+    for (auto doc : stream) {
+      ASSERT_SUCCESS(doc.get_int64().get(i));
+      ASSERT_EQUAL(i, ++expected);
+    }
+    ASSERT_EQUAL(expected, 2);
+
+    simdjson::padded_string comma_double("-42" + long_gap + ",-1");
+    ASSERT_SUCCESS(parser.iterate_many(comma_double, comma_double.size(), stream_format::comma_delimited).get(stream));
+    expected = 0;
+    const double double_values[2] = {-42.0, -1.0};
+    for (auto doc : stream) {
+      ASSERT_SUCCESS(doc.get_double().get(d));
+      ASSERT_EQUAL(d, double_values[expected++]);
+    }
+    ASSERT_EQUAL(expected, 2);
+
+    simdjson::padded_string comma_quoted(std::string("\"18446744073709551615\",1"));
+    ASSERT_SUCCESS(parser.iterate_many(comma_quoted, comma_quoted.size(), stream_format::comma_delimited).get(stream));
+    expected = 0;
+    for (auto doc : stream) {
+      if (expected == 0) {
+        ASSERT_SUCCESS(doc.get_uint64_in_string().get(u));
+        ASSERT_EQUAL(u, (std::numeric_limits<uint64_t>::max)());
+      } else {
+        ASSERT_SUCCESS(doc.get_int64().get(i));
+        ASSERT_EQUAL(i, 1);
+      }
+      expected++;
+    }
+    ASSERT_EQUAL(expected, 2);
+
+    simdjson::padded_string seq_gap(std::string("\x1e") + "1" + gap + "\x1e" + "2");
+    ASSERT_SUCCESS(parser.iterate_many(seq_gap, seq_gap.size(), stream_format::json_sequence).get(stream));
+    expected = 0;
+    for (auto doc : stream) {
+      ASSERT_SUCCESS(doc.get_int64().get(i));
+      ASSERT_EQUAL(i, ++expected);
+    }
+    ASSERT_EQUAL(expected, 2);
+
+    // The RS sits inside the integer scratch buffer once trailing spaces are
+    // trimmed down to its capacity.
+    simdjson::padded_string seq_rs_inside(std::string("\x1e") + "1\x1e" + gap + "2");
+    ASSERT_SUCCESS(parser.iterate_many(seq_rs_inside, seq_rs_inside.size(), stream_format::json_sequence).get(stream));
+    expected = 0;
+    for (auto doc : stream) {
+      ASSERT_SUCCESS(doc.get_int64().get(i));
+      ASSERT_EQUAL(i, ++expected);
+    }
+    ASSERT_EQUAL(expected, 2);
+
+    simdjson::padded_string seq_double(std::string("\x1e") + "-1.5\x1e" + gap + "2");
+    ASSERT_SUCCESS(parser.iterate_many(seq_double, seq_double.size(), stream_format::json_sequence).get(stream));
+    expected = 0;
+    for (auto doc : stream) {
+      ASSERT_SUCCESS(doc.get_double().get(d));
+      ASSERT_EQUAL(d, expected == 0 ? -1.5 : 2.0);
+      expected++;
+    }
+    ASSERT_EQUAL(expected, 2);
+    TEST_SUCCEED();
+  }
+
+  // Checks get_double(), get_float() and their _in_string variants, at the
+  // root and inside an array.
+  bool check_long_exponent(const std::string &number, double expected, error_code expected_error = SUCCESS) {
+    simdjson::padded_string root(number);
+    simdjson::padded_string array("[" + number + "]");
+    simdjson::padded_string quoted("\"" + number + "\"");
+    simdjson::padded_string quoted_array("[\"" + number + "\"]");
+    simdjson::ondemand::parser parser;
+    simdjson::ondemand::document doc;
+    double d{};
+    float f{};
+    std::cout << "  " << number << std::endl;
+    ASSERT_SUCCESS(parser.iterate(root).get(doc));
+    ASSERT_ERROR(doc.get_double().get(d), expected_error);
+    if (!expected_error) { ASSERT_EQUAL(d, expected); ASSERT_EQUAL(std::signbit(d), std::signbit(expected)); }
+    ASSERT_SUCCESS(parser.iterate(root).get(doc));
+    ASSERT_ERROR(doc.get_float().get(f), expected_error);
+    if (!expected_error) { ASSERT_EQUAL(f, float(expected)); ASSERT_EQUAL(std::signbit(f), std::signbit(expected)); }
+    ASSERT_SUCCESS(parser.iterate(array).get(doc));
+    ASSERT_ERROR(doc.get_array().at(0).get_double().get(d), expected_error);
+    if (!expected_error) { ASSERT_EQUAL(d, expected); }
+    ASSERT_SUCCESS(parser.iterate(array).get(doc));
+    ASSERT_ERROR(doc.get_array().at(0).get_float().get(f), expected_error);
+    if (!expected_error) { ASSERT_EQUAL(f, float(expected)); }
+    ASSERT_SUCCESS(parser.iterate(quoted).get(doc));
+    ASSERT_ERROR(doc.get_double_in_string().get(d), expected_error);
+    if (!expected_error) { ASSERT_EQUAL(d, expected); }
+    ASSERT_SUCCESS(parser.iterate(quoted).get(doc));
+    ASSERT_ERROR(doc.get_float_in_string().get(f), expected_error);
+    if (!expected_error) { ASSERT_EQUAL(f, float(expected)); }
+    ASSERT_SUCCESS(parser.iterate(quoted_array).get(doc));
+    ASSERT_ERROR(doc.get_array().at(0).get_double_in_string().get(d), expected_error);
+    if (!expected_error) { ASSERT_EQUAL(d, expected); }
+    ASSERT_SUCCESS(parser.iterate(quoted_array).get(doc));
+    ASSERT_ERROR(doc.get_array().at(0).get_float_in_string().get(f), expected_error);
+    if (!expected_error) { ASSERT_EQUAL(f, float(expected)); }
+    return true;
+  }
+
+  bool long_exponents() {
+    TEST_START();
+    // JSON does not limit the number of exponent digits, and the DOM parser
+    // and get_number() accept an exponent of more than 19 digits.
+    ASSERT_TRUE(check_long_exponent("1e000000000000000000001", 10));
+    ASSERT_TRUE(check_long_exponent("5E-0000000000000000000001", 0.5));
+    ASSERT_TRUE(check_long_exponent("0e9999999999999999999999999999", 0));
+    ASSERT_TRUE(check_long_exponent("-0e+99999999999999999999", -0.0));
+    ASSERT_TRUE(check_long_exponent("1.5e-99999999999999999999", 0));
+    // Still infinite, hence an error.
+    ASSERT_TRUE(check_long_exponent("1e99999999999999999999", 0, NUMBER_ERROR));
+    TEST_SUCCEED();
+  }
+
   bool run() {
-    return issue2017() &&
+    return get_int32_values() &&
+           get_uint32_values() &&
+           get_uint16_values() &&
+           get_int16_values() &&
+           get_uint8_values() &&
+           get_int8_values() &&
+           minus_zero() &&
+           gigantic_big_int() &&
+           big_int_not_zero() &&
+           positive_big_int() &&
+           negative_big_int() &&
+           issue2099() &&
+           issue2093() &&
+           issue2045() &&
+           issue2017() &&
            issue_1898() &&
            issue1878() &&
            get_root_number_tests() &&
            get_number_tests()&&
            small_integers() &&
+           issue2570() &&
            powers_of_two() &&
            powers_of_ten() &&
-           old_crashes();
+           old_crashes() &&
+           root_number_scratch_padding() &&
+           root_number_trailing_whitespace() &&
+           root_number_stream_delimiters() &&
+           long_exponents();
   }
 
 } // namespace number_tests

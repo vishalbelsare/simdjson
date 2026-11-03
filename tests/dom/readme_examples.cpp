@@ -1,5 +1,6 @@
 #include <iostream>
 #include "simdjson.h"
+#include "simdjson/padded_string_view.h"
 
 using namespace std;
 using namespace simdjson;
@@ -19,6 +20,62 @@ void basics_2() {
   dom::element doc = parser.parse("[1,2,3]"_padded); // parse a string
 
   cout << doc;
+}
+
+void wild() {
+  simdjson::padded_string json_string = R"(
+  {
+    "firstName": "John",
+    "lastName": "doe",
+    "age": 26,
+    "address": {
+      "streetAddress": "naist street",
+      "city": "Nara",
+      "postalCode": "630-0192"
+    },
+    "phoneNumbers": [
+      {
+        "type": "iPhone",
+        "numbers": ["0123-4567-8888", "0123-4567-8788"]
+      },
+      {
+        "type": "home",
+        "numbers": ["0123-4567-8910"]
+      }
+    ]
+  })"_padded;
+
+  dom::parser parser;
+  dom::element parsed_json = parser.parse(json_string);
+  std::vector<dom::element> values;
+
+  // Fetch all fields in the address object
+  auto error = parsed_json.at_path_with_wildcard("$.address.*").get(values);
+  if(error) {
+    // do something
+  }
+  for (auto &value : values) {
+    std::string_view field;
+    error = value.get(field);
+    if(error) {
+      // do something
+    }
+    std::cout << field << std::endl;
+  }
+
+  // Fetch all phone numbers
+  error = parsed_json.at_path_with_wildcard("$.phoneNumbers[*].numbers[*]").get(values);
+  if(error) {
+    // do something
+  }
+  for (auto &value : values) {
+    std::string_view number;
+    error = value.get(number);
+    if(error) {
+      // do something
+    }
+    std::cout << number << std::endl;
+  }
 }
 
 void basics_dom_1() {
@@ -166,6 +223,9 @@ namespace ondemand_treewalk {
         cout << "null";
       }
       break;
+    case ondemand::json_type::unknown:
+      cout << "unknown"; // indicates an error
+      break;
     }
   }
 
@@ -213,6 +273,9 @@ namespace treewalk_1 {
         break;
       case dom::element_type::NULL_VALUE:
         cout << "null" << endl;
+        break;
+      case dom::element_type::BIGINT:
+        cout << element.get_bigint().value_unsafe() << endl;
         break;
     }
   }
@@ -461,7 +524,81 @@ void parse_documentation_lowlevel() {
   (void)element;
 }
 
+void simplepad() {
+  std::string json = "[1]";
+  dom::parser parser;
+  dom::element doc;
+  auto error = parser.parse(simdjson::pad(json)).get(doc);
+  if(error) { exit(-1); }
+}
+
+#if SIMDJSON_CPLUSPLUS17
+void simpleinputpad_dom1() {
+  std::string_view json = "[1,2,3]";
+  simdjson::padded_input input(json);
+  dom::parser parser;
+  dom::element doc;
+  auto error = parser.parse(input).get(doc);
+  if(error) { exit(-1); }
+}
+
+void simpleinputpad_dom2() {
+  const char *jsonpointer = R"(
+        {
+            "key": "value"
+        }
+    )";
+  size_t len = strlen(jsonpointer);
+  simdjson::padded_input input(jsonpointer, len);
+  dom::parser parser;
+  dom::element doc;
+  auto error = parser.parse(input).get(doc);
+  if(error) { exit(-1); }
+  std::string_view val;
+  error = doc["key"].get(val);
+  if(error) { exit(-1); }
+  if(val != "value") { exit(-1); }
+}
+#endif // SIMDJSON_CPLUSPLUS17
+
+void jsondollar() {
+  dom::parser parser;
+  auto json = R"( { "c" :{ "foo": { "a": [ 10, 20, 30 ] }}, "d": { "foo2": { "a": [ 10, 20, 30 ] }} , "e": 120 })"_padded;
+  dom::element doc;
+  auto error = parser.parse(json).get(doc);
+  if(error) { exit(-1); }
+  dom::object obj;
+  error = doc.get_object().get(obj);
+  if(error) { exit(-1); }
+  int64_t x = 0; // initialization to silence unwarranted compiler warning
+  error = obj.at_path("$[3].foo.a[1]").get(x);
+  if(error) { exit(-1); }
+  if(x != 20) { exit(-1); }
+  x = obj.at_path("$.d.foo2.a.2");
+  if(x != 30) { exit(-1); }
+  if(error) { exit(-1); }
+}
+
+void jsonpath() {
+  auto cars_json = R"( [
+    { "make": "Toyota", "model": "Camry",  "year": 2018, "tire_pressure": [ 40.1, 39.9, 37.7, 40.4 ] },
+    { "make": "Kia",    "model": "Soul",   "year": 2012, "tire_pressure": [ 30.1, 31.0, 28.6, 28.7 ] },
+    { "make": "Toyota", "model": "Tercel", "year": 1999, "tire_pressure": [ 29.8, 30.0, 30.2, 30.5 ] }
+  ] )"_padded;
+  dom::parser parser;
+  dom::element doc;
+  auto error = parser.parse(cars_json).get(doc);
+  if(error) { exit(-1); }
+  double p = 0.0; // initialization to silence unwarranted compiler warning
+  error = doc.at_path("[0].tire_pressure[1]").get(p);
+  if(error) { exit(-1); }
+  if(p != 39.9) { exit(-1); }
+}
+
 int main() {
+  simplepad();
+  jsonpath();
+  jsondollar();
   basics_dom_1();
   basics_dom_2();
   basics_dom_3();

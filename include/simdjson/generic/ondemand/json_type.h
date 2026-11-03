@@ -1,10 +1,21 @@
+#ifndef SIMDJSON_GENERIC_ONDEMAND_JSON_TYPE_H
+
+#ifndef SIMDJSON_CONDITIONAL_INCLUDE
+#define SIMDJSON_GENERIC_ONDEMAND_JSON_TYPE_H
+#include "simdjson/generic/ondemand/base.h"
+#include "simdjson/generic/implementation_simdjson_result_base.h"
+#include "simdjson/generic/numberparsing.h"
+#endif // SIMDJSON_CONDITIONAL_INCLUDE
+
 namespace simdjson {
 namespace SIMDJSON_IMPLEMENTATION {
 namespace ondemand {
+
 /**
  * The type of a JSON value.
  */
 enum class json_type {
+    unknown=0,
     // Start at 1 to catch uninitialized / default values more easily
     array=1, ///< A JSON array   ( [ 1, 2, 3 ... ] )
     object,  ///< A JSON object  ( { "a": 1, "b" 2, ... } )
@@ -13,8 +24,6 @@ enum class json_type {
     boolean, ///< A JSON boolean (true or false)
     null     ///< A JSON null    (null)
 };
-
-class value_iterator;
 
 /**
  * A type representing a JSON number.
@@ -34,7 +43,7 @@ struct number {
    *        unsigned_integer         /// a positive integer larger or equal to 1<<63
    *    };
    */
-  simdjson_inline number_type get_number_type() const noexcept;
+  simdjson_inline ondemand::number_type get_number_type() const noexcept;
   /**
    * return true if the automatically determined type of
    * the number is number_type::unsigned_integer.
@@ -83,8 +92,6 @@ protected:
    * of the core simdjson library.
    */
   friend class value_iterator;
-  template<typename W>
-  friend error_code numberparsing::slow_float_parsing(simdjson_unused const uint8_t * src, W writer);
   template<typename W>
   friend error_code numberparsing::write_float(const uint8_t *const src, bool negative, uint64_t i, const uint8_t * start_digits, size_t digit_count, int64_t exponent, W &writer);
   template<typename W>
@@ -150,3 +157,5 @@ public:
 };
 
 } // namespace simdjson
+
+#endif // SIMDJSON_GENERIC_ONDEMAND_JSON_TYPE_H

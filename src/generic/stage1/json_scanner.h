@@ -1,3 +1,12 @@
+#ifndef SIMDJSON_SRC_GENERIC_STAGE1_JSON_SCANNER_H
+
+#ifndef SIMDJSON_CONDITIONAL_INCLUDE
+#define SIMDJSON_SRC_GENERIC_STAGE1_JSON_SCANNER_H
+#include <generic/stage1/base.h>
+#include <generic/json_character_block.h>
+#include <generic/stage1/json_string_scanner.h>
+#endif // SIMDJSON_CONDITIONAL_INCLUDE
+
 namespace simdjson {
 namespace SIMDJSON_IMPLEMENTATION {
 namespace {
@@ -99,7 +108,7 @@ public:
   json_scanner() = default;
   simdjson_inline json_block next(const simd::simd8x64<uint8_t>& in);
   // Returns either UNCLOSED_STRING or SUCCESS
-  simdjson_inline error_code finish();
+  simdjson_warn_unused simdjson_inline error_code finish();
 
 private:
   // Whether the last character of the previous iteration is part of a scalar token
@@ -147,7 +156,7 @@ simdjson_inline json_block json_scanner::next(const simd::simd8x64<uint8_t>& in)
   );
 }
 
-simdjson_inline error_code json_scanner::finish() {
+simdjson_warn_unused simdjson_inline error_code json_scanner::finish() {
   return string_scanner.finish();
 }
 
@@ -155,3 +164,5 @@ simdjson_inline error_code json_scanner::finish() {
 } // unnamed namespace
 } // namespace SIMDJSON_IMPLEMENTATION
 } // namespace simdjson
+
+#endif // SIMDJSON_SRC_GENERIC_STAGE1_JSON_SCANNER_H

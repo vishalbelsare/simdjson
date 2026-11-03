@@ -29,7 +29,7 @@ It is sometimes useful to start with an example. Consider the following JSON doc
 The following is a dump of the content of the tape, with the first number of each line representing the index of a tape element.
 
 ### The Tape
-| index | element (64 bit word)                                               |
+| index | element (64-bit word)                                               |
 | ----- | ------------------------------------------------------------------- |
 | 0     | r	// pointing to 39 (right after last node)                         |
 | 1     | {	// pointing to next tape location 38 (first node after the scope) |
@@ -92,6 +92,14 @@ Float values are represented as two 64-bit tape elements:
 - The 64-bit value `('d' << 56)` followed by the 64-bit double value literally in standard IEEE 754 notation.
 
 Performance consideration: We store numbers of the main tape because we believe that locality of reference is helpful for performance.
+
+## Big Integers
+
+When a JSON integer exceeds the 64-bit range (both signed and unsigned), it is classified as a big integer. By default, parsing returns `BIGINT_ERROR`. When `parser.number_as_string(true)` is set, the raw digits are stored on the string tape using the same format as strings (4-byte little-endian length prefix, followed by the UTF-8 digit bytes, followed by a null terminator).
+
+A big integer is represented on the main tape as the 64-bit tape element `('Z' << 56) + x` where the payload `x` is the location on the string tape of the null-terminated digit string.
+
+For example, the JSON value `99999999999999999999` would be stored as the string `"99999999999999999999"` on the string tape, with a `'Z'` tag on the main tape. Negative big integers include the leading minus sign.
 
 ## Root node
 

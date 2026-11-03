@@ -1,3 +1,12 @@
+#ifndef SIMDJSON_GENERIC_ONDEMAND_TOKEN_ITERATOR_H
+
+#ifndef SIMDJSON_CONDITIONAL_INCLUDE
+#define SIMDJSON_GENERIC_ONDEMAND_TOKEN_ITERATOR_H
+#include "simdjson/generic/ondemand/base.h"
+#include "simdjson/generic/implementation_simdjson_result_base.h"
+#include "simdjson/generic/ondemand/logger.h"
+#endif // SIMDJSON_CONDITIONAL_INCLUDE
+
 namespace simdjson {
 namespace SIMDJSON_IMPLEMENTATION {
 namespace ondemand {
@@ -15,7 +24,7 @@ public:
    *
    * Exists so you can declare a variable and later assign to it before use.
    */
-  simdjson_inline token_iterator() noexcept = default;
+  simdjson_inline token_iterator() noexcept {}
   simdjson_inline token_iterator(token_iterator &&other) noexcept = default;
   simdjson_inline token_iterator &operator=(token_iterator &&other) noexcept = default;
   simdjson_inline token_iterator(const token_iterator &other) noexcept = default;
@@ -38,7 +47,7 @@ public:
    *              1 = next token, -1 = prev token.
    *
    * TODO consider a string_view, assuming the length will get stripped out by the optimizer when
-   * it isn't used ...
+   * it is not used...
    */
   simdjson_inline const uint8_t *peek(int32_t delta=0) const noexcept;
   /**
@@ -68,7 +77,14 @@ public:
    * @param position The position of the token.
    */
   simdjson_inline uint32_t peek_length(token_position position) const noexcept;
-
+  /**
+   * Get the maximum length of the JSON text for a root token.
+   *
+   * The length will include any whitespace at the end of the token.
+   *
+   * @param position The position of the token (start of the document).
+   */
+  simdjson_inline uint32_t peek_root_length(token_position position) const noexcept;
   /**
    * Return the current index.
    */
@@ -114,10 +130,13 @@ protected:
   token_position _position{};
 
   friend class json_iterator;
+  friend class document_stream;
   friend class value_iterator;
   friend class object;
-  friend simdjson_inline void logger::log_line(const json_iterator &iter, const char *title_prefix, const char *title, std::string_view detail, int delta, int depth_delta) noexcept;
-  friend simdjson_inline void logger::log_line(const json_iterator &iter, token_position index, depth_t depth, const char *title_prefix, const char *title, std::string_view detail) noexcept;
+  template <typename... Args>
+  friend simdjson_inline void logger::log_line(const json_iterator &iter, const char *title_prefix, const char *title, std::string_view detail, int delta, int depth_delta, logger::log_level level, Args&&... args) noexcept;
+  template <typename... Args>
+  friend simdjson_inline void logger::log_line(const json_iterator &iter, token_position index, depth_t depth, const char *title_prefix, const char *title, std::string_view detail, logger::log_level level, Args&&... args) noexcept;
 };
 
 } // namespace ondemand
@@ -136,3 +155,5 @@ public:
 };
 
 } // namespace simdjson
+
+#endif // SIMDJSON_GENERIC_ONDEMAND_TOKEN_ITERATOR_H

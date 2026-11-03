@@ -1,6 +1,16 @@
+#ifndef SIMDJSON_SRC_GENERIC_STAGE1_BUF_BLOCK_READER_H
+
+#ifndef SIMDJSON_CONDITIONAL_INCLUDE
+#define SIMDJSON_SRC_GENERIC_STAGE1_BUF_BLOCK_READER_H
+#include <generic/stage1/base.h>
+#endif // SIMDJSON_CONDITIONAL_INCLUDE
+
+#include <cstring>
+
 namespace simdjson {
 namespace SIMDJSON_IMPLEMENTATION {
 namespace {
+namespace stage1 {
 
 // Walks through a buffer in block-sized increments, loading the last part with spaces
 template<size_t STEP_SIZE>
@@ -20,6 +30,17 @@ public:
    * @return the number of effective characters in the last block.
    */
   simdjson_inline size_t get_remainder(uint8_t *dst) const;
+  /**
+   * Like get_remainder, for input followed by SIMDJSON_PADDING readable bytes.
+   *
+   * get_remainder writes the block with a memset and a memcpy of the remaining
+   * length, and the vector loads that read it back cannot be forwarded from
+   * those narrower stores: they wait until the stores reach the cache, which
+   * costs tens of cycles on every document. Here the block is put together in
+   * vector registers, from loads that may read into the padding, and written
+   * with full-width stores that the loads can forward from.
+   */
+  simdjson_inline size_t get_remainder_padded(uint8_t *dst) const;
   simdjson_inline void advance();
 private:
   const uint8_t *buf;
@@ -27,36 +48,6 @@ private:
   const size_t lenminusstep;
   size_t idx;
 };
-
-// Routines to print masks and text for debugging bitmask operations
-simdjson_unused static char * format_input_text_64(const uint8_t *text) {
-  static char buf[sizeof(simd8x64<uint8_t>) + 1];
-  for (size_t i=0; i<sizeof(simd8x64<uint8_t>); i++) {
-    buf[i] = int8_t(text[i]) < ' ' ? '_' : int8_t(text[i]);
-  }
-  buf[sizeof(simd8x64<uint8_t>)] = '\0';
-  return buf;
-}
-
-// Routines to print masks and text for debugging bitmask operations
-simdjson_unused static char * format_input_text(const simd8x64<uint8_t>& in) {
-  static char buf[sizeof(simd8x64<uint8_t>) + 1];
-  in.store(reinterpret_cast<uint8_t*>(buf));
-  for (size_t i=0; i<sizeof(simd8x64<uint8_t>); i++) {
-    if (buf[i] < ' ') { buf[i] = '_'; }
-  }
-  buf[sizeof(simd8x64<uint8_t>)] = '\0';
-  return buf;
-}
-
-simdjson_unused static char * format_mask(uint64_t mask) {
-  static char buf[sizeof(simd8x64<uint8_t>) + 1];
-  for (size_t i=0; i<64; i++) {
-    buf[i] = (mask & (size_t(1) << i)) ? 'X' : ' ';
-  }
-  buf[64] = '\0';
-  return buf;
-}
 
 template<size_t STEP_SIZE>
 simdjson_inline buf_block_reader<STEP_SIZE>::buf_block_reader(const uint8_t *_buf, size_t _len) : buf{_buf}, len{_len}, lenminusstep{len < STEP_SIZE ? 0 : len - STEP_SIZE}, idx{0} {}
@@ -82,11 +73,46 @@ simdjson_inline size_t buf_block_reader<STEP_SIZE>::get_remainder(uint8_t *dst) 
   return len - idx;
 }
 
+// keep_mask[128 - n + i] is 0xFF for i < n and 0 otherwise.
+alignas(64) static const uint8_t keep_mask[256] = {
+  0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF,
+  0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF,
+  0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF,
+  0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF,
+  0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF,
+  0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF,
+  0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF,
+  0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF
+};
+
+template<size_t STEP_SIZE>
+simdjson_inline size_t buf_block_reader<STEP_SIZE>::get_remainder_padded(uint8_t *dst) const {
+  static_assert(STEP_SIZE <= 128, "keep_mask covers blocks of up to 128 bytes");
+  static_assert(sizeof(simd::simd8<uint8_t>) <= SIMDJSON_PADDING, "a vector load at the last byte must stay in the padding");
+  const size_t remaining = len - idx;
+  if (remaining == 0) { return 0; }
+  const simd::simd8<uint8_t> spaces = simd::simd8<uint8_t>::splat(0x20);
+  for (size_t off = 0; off < STEP_SIZE; off += sizeof(simd::simd8<uint8_t>)) {
+    simd::simd8<uint8_t> v = spaces;
+    if (off < remaining) {
+      // Starts before len, so it ends within the padding.
+      const simd::simd8<uint8_t> in = simd::simd8<uint8_t>::load(buf + idx + off);
+      const simd::simd8<uint8_t> keep = simd::simd8<uint8_t>::load(keep_mask + 128 - remaining + off);
+      v = spaces ^ ((in ^ spaces) & keep);
+    }
+    v.store(dst + off);
+  }
+  return remaining;
+}
+
 template<size_t STEP_SIZE>
 simdjson_inline void buf_block_reader<STEP_SIZE>::advance() {
   idx += STEP_SIZE;
 }
 
+} // namespace stage1
 } // unnamed namespace
 } // namespace SIMDJSON_IMPLEMENTATION
 } // namespace simdjson
+
+#endif // SIMDJSON_SRC_GENERIC_STAGE1_BUF_BLOCK_READER_H

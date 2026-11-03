@@ -6,10 +6,17 @@
 #include <cstdlib>
 #include <cfloat>
 #include <cassert>
+#include <climits>
 #ifndef _WIN32
 // strcasecmp, strncasecmp
 #include <strings.h>
 #endif
+
+static_assert(CHAR_BIT == 8, "simdjson requires 8-bit bytes");
+
+
+// We are using size_t without namespace std:: throughout the project
+using std::size_t;
 
 #ifdef _MSC_VER
 #define SIMDJSON_VISUAL_STUDIO 1
@@ -32,19 +39,61 @@
 #endif // __clang__
 #endif // _MSC_VER
 
-#if defined(__x86_64__) || defined(_M_AMD64)
+#if (defined(__x86_64__) || defined(_M_AMD64)) && !defined(_M_ARM64EC)
 #define SIMDJSON_IS_X86_64 1
-#elif defined(__aarch64__) || defined(_M_ARM64)
+#elif defined(__aarch64__) || defined(_M_ARM64) || defined(_M_ARM64EC)
 #define SIMDJSON_IS_ARM64 1
+#elif defined(__riscv) && __riscv_xlen == 64
+#define SIMDJSON_IS_RISCV64 1
+
+  #if __riscv_v_intrinsic >= 11000
+    #define SIMDJSON_HAS_RVV_INTRINSICS 1
+  #endif
+
+  #if SIMDJSON_HAS_RVV_INTRINSICS && __riscv_vector && __riscv_v_min_vlen >= 128 && __riscv_v_elen >= 64
+    #define SIMDJSON_IS_RVV 1 // RISC-V V extension
+  #endif
+
+  // current toolchains don't support fixed-size SIMD types that don't match VLEN directly
+  #if __riscv_v_fixed_vlen >= 128 && __riscv_v_fixed_vlen <= 512
+    #define SIMDJSON_IS_RVV_VLS 1
+  #endif
+
+#elif defined(__loongarch_lp64)
+#define SIMDJSON_IS_LOONGARCH64 1
+#if defined(__loongarch_sx) && defined(__loongarch_asx)
+  #define SIMDJSON_IS_LSX 1
+  #define SIMDJSON_IS_LASX 1 // We can always run both
+#elif defined(__loongarch_sx)
+  #define SIMDJSON_IS_LSX 1
+
+// Adjust for runtime dispatching support.
+#if defined(__GNUC__) && !defined(__clang__) && !defined(__INTEL_COMPILER) && !defined(__NVCOMPILER)
+#if __GNUC__ > 15 || (__GNUC__ == 15 && __GNUC_MINOR__ >= 0)
+  // We are ok, we will support runtime dispatch for LASX.
+#else
+  // We disable runtime dispatch for LASX, which means that we will not be able to use LASX
+  // even if it is supported by the hardware.
+  // Loongson users should update to GCC 15 or better.
+  #define SIMDJSON_IMPLEMENTATION_LASX 0
+#endif
+#else
+  // We are not using GCC, so we assume that we can support runtime dispatch for LASX.
+  // https://godbolt.org/z/jcMnrjYhs
+  #define SIMDJSON_IMPLEMENTATION_LASX 0
+#endif
+
+
+
+#endif
 #elif defined(__PPC64__) || defined(_M_PPC64)
-#if defined(__ALTIVEC__)
+#define SIMDJSON_IS_PPC64 1
+#if defined(__ALTIVEC__) && defined(__POWER8_VECTOR__)
 #define SIMDJSON_IS_PPC64_VMX 1
 #endif // defined(__ALTIVEC__)
 #else
 #define SIMDJSON_IS_32BITS 1
 
-// We do not support 32-bit platforms, but it can be
-// handy to identify them.
 #if defined(_M_IX86) || defined(__i386__)
 #define SIMDJSON_IS_X86_32BITS 1
 #elif defined(__arm__) || defined(_M_ARM)
@@ -60,13 +109,16 @@
 
 #if SIMDJSON_IS_32BITS
 #ifndef SIMDJSON_NO_PORTABILITY_WARNING
-#pragma message("The simdjson library is designed \
-for 64-bit processors and it seems that you are not \
-compiling for a known 64-bit platform. All fast kernels \
-will be disabled and performance may be poor. Please \
-use a 64-bit target such as x64, 64-bit ARM or 64-bit PPC.")
+// In the future, we should allow programmers
+// to get warning.
 #endif // SIMDJSON_NO_PORTABILITY_WARNING
 #endif // SIMDJSON_IS_32BITS
+
+#define SIMDJSON_CAT_IMPLEMENTATION_(a,...) a ## __VA_ARGS__
+#define SIMDJSON_CAT(a,...) SIMDJSON_CAT_IMPLEMENTATION_(a, __VA_ARGS__)
+
+#define SIMDJSON_STRINGIFY_IMPLEMENTATION_(a,...) #a SIMDJSON_STRINGIFY(__VA_ARGS__)
+#define SIMDJSON_STRINGIFY(a,...) SIMDJSON_CAT_IMPLEMENTATION_(a, __VA_ARGS__)
 
 // this is almost standard?
 #undef SIMDJSON_STRINGIFY_IMPLEMENTATION_
@@ -89,7 +141,7 @@ use a 64-bit target such as x64, 64-bit ARM or 64-bit PPC.")
 //
 
 // We are going to use runtime dispatch.
-#if SIMDJSON_IS_X86_64
+#if defined(SIMDJSON_IS_X86_64) || defined(SIMDJSON_IS_LSX)
 #ifdef __clang__
 // clang does not have GCC push pop
 // warning: clang attribute push can't be used within a namespace in clang up
@@ -106,7 +158,7 @@ use a 64-bit target such as x64, 64-bit ARM or 64-bit PPC.")
 #define SIMDJSON_UNTARGET_REGION _Pragma("GCC pop_options")
 #endif // clang then gcc
 
-#endif // x86
+#endif // defined(SIMDJSON_IS_X86_64) || defined(SIMDJSON_IS_LSX)
 
 // Default target region macros don't do anything.
 #ifndef SIMDJSON_TARGET_REGION
@@ -143,6 +195,11 @@ use a 64-bit target such as x64, 64-bit ARM or 64-bit PPC.")
 #define SIMDJSON_NO_SANITIZE_UNDEFINED
 #endif
 
+#if defined(__clang__) || defined(__GNUC__)
+#define simdjson_pure [[gnu::pure]]
+#else
+#define simdjson_pure
+#endif
 
 #if defined(__clang__) || defined(__GNUC__)
 #if defined(__has_feature)
@@ -170,9 +227,11 @@ use a 64-bit target such as x64, 64-bit ARM or 64-bit PPC.")
 #define simdjson_strncasecmp strncasecmp
 #endif
 
-#if defined(NDEBUG) || defined(__OPTIMIZE__) || (defined(_MSC_VER) && !defined(_DEBUG))
+#if (defined(NDEBUG) || defined(__OPTIMIZE__) || (defined(_MSC_VER) && !defined(_DEBUG))) && !SIMDJSON_DEVELOPMENT_CHECKS
+// If SIMDJSON_DEVELOPMENT_CHECKS is undefined or 0, we consider that we are in release mode.
 // If NDEBUG is set, or __OPTIMIZE__ is set, or we are under MSVC in release mode,
 // then do away with asserts and use __assume.
+// We still recommend that our users set NDEBUG in release mode.
 #if SIMDJSON_VISUAL_STUDIO
 #define SIMDJSON_UNREACHABLE() __assume(0)
 #define SIMDJSON_ASSUME(COND) __assume(COND)
@@ -181,11 +240,98 @@ use a 64-bit target such as x64, 64-bit ARM or 64-bit PPC.")
 #define SIMDJSON_ASSUME(COND) do { if (!(COND)) __builtin_unreachable(); } while (0)
 #endif
 
-#else // defined(NDEBUG) || defined(__OPTIMIZE__) || (defined(_MSC_VER) && !defined(_DEBUG))
+#else // defined(NDEBUG) || defined(__OPTIMIZE__) || (defined(_MSC_VER) && !defined(_DEBUG)) && !SIMDJSON_DEVELOPMENT_CHECKS
 // This should only ever be enabled in debug mode.
 #define SIMDJSON_UNREACHABLE() assert(0);
 #define SIMDJSON_ASSUME(COND) assert(COND)
 
+#endif
+
+
+
+#if defined __BYTE_ORDER__ && defined __ORDER_BIG_ENDIAN__
+#define SIMDJSON_IS_BIG_ENDIAN (__BYTE_ORDER__ == __ORDER_BIG_ENDIAN__)
+#elif defined _WIN32
+#define SIMDJSON_IS_BIG_ENDIAN 0
+#else
+#if defined(__APPLE__) || defined(__FreeBSD__)
+#include <machine/endian.h>
+#elif defined(sun) || defined(__sun)
+#include <sys/byteorder.h>
+#elif defined(__MVS__)
+#include <sys/endian.h>
+#else
+#ifdef __has_include
+#if __has_include(<endian.h>)
+#include <endian.h>
+#endif //__has_include(<endian.h>)
+#endif //__has_include
+#endif
+#
+#ifndef __BYTE_ORDER__
+// safe choice
+#define SIMDJSON_IS_BIG_ENDIAN 0
+#endif
+#
+#ifndef __ORDER_LITTLE_ENDIAN__
+// safe choice
+#define SIMDJSON_IS_BIG_ENDIAN 0
+#endif
+#
+#if __BYTE_ORDER__ == __ORDER_LITTLE_ENDIAN__
+#define SIMDJSON_IS_BIG_ENDIAN 0
+#else
+#define SIMDJSON_IS_BIG_ENDIAN 1
+#endif
+#endif
+
+#ifndef SIMDJSON_HAS_UNISTD_H
+#if defined(__unix__) || defined(__APPLE__) || defined(__linux__)
+#define SIMDJSON_HAS_UNISTD_H 1
+#else
+#define SIMDJSON_HAS_UNISTD_H 0
+#endif
+#endif
+
+// padded_memory_map availability.
+//
+// On POSIX platforms the class is always available: the implementation uses
+// `mmap` (and a trailing anonymous page for padding) from <sys/mman.h>.
+//
+// On Windows the class is disabled by default and must be explicitly
+// opted into by defining `SIMDJSON_ENABLE_MEMORY_FILE_MAPPING_ON_WINDOWS=1`. Enabling
+// it requires:
+//   1. `<windows.h>` has been included *before* `<simdjson.h>` (so that
+//      this header can see the Win32 types and the `_WINDOWS_` include
+//      guard),
+//   2. the compilation targets Windows 10, version 1803 or later
+//      (i.e. `NTDDI_VERSION >= NTDDI_WIN10_RS4`, `0x0A000005`). This is
+//      required because the implementation relies on the modern memory
+//      APIs introduced with that version (`CreateFileMapping2` /
+//      `MapViewOfFile3`),
+//   3. the link step pulls in an import library that exports those APIs,
+//      typically `onecore.lib` (or `mincore.lib`).
+//
+// The `SIMDJSON_ENABLE_MEMORY_FILE_MAPPING_ON_WINDOWS` CMake option arranges (1)-(3)
+// automatically when building simdjson with its own CMake. Consumers using
+// simdjson as a pre-built library are responsible for setting the macro,
+// the Windows version macros, and the link library themselves.
+//
+// If the opt-in conditions are not met on Windows, `padded_memory_map`
+// simply does not exist -- any attempt to use it fails at compile time
+// with an "unknown identifier" diagnostic rather than silently degrading.
+//
+// The SIMDJSON_HAS_PADDED_MEMORY_MAP macro reflects whether the class is
+// available in the current translation unit. Users may test this macro to
+// conditionally compile code that depends on padded_memory_map.
+#ifndef SIMDJSON_HAS_PADDED_MEMORY_MAP
+  #if defined(__unix__) || defined(__APPLE__) || defined(__linux__)
+    #define SIMDJSON_HAS_PADDED_MEMORY_MAP 1
+  #elif defined(_WINDOWS_) && defined(SIMDJSON_ENABLE_MEMORY_FILE_MAPPING_ON_WINDOWS) && SIMDJSON_ENABLE_MEMORY_FILE_MAPPING_ON_WINDOWS
+    #define SIMDJSON_HAS_PADDED_MEMORY_MAP 1
+  #else
+    #define SIMDJSON_HAS_PADDED_MEMORY_MAP 0
+  #endif
 #endif
 
 #endif // SIMDJSON_PORTABILITY_H

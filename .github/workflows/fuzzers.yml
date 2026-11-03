@@ -10,6 +10,12 @@ on:
   schedule:
     - cron: 23 */8 * * *
 
+# A new push to a pull request cancels its previous run. Other runs (pushes to
+# master, schedules) get a group of their own and are never cancelled.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event_name == 'pull_request' && github.ref || github.run_id }}
+  cancel-in-progress: true
+
 jobs:
   build:
     if: >-
@@ -24,7 +30,7 @@ jobs:
       implementations: haswell westmere fallback
       UBSAN_OPTIONS: halt_on_error=1
       MAXLEN: -max_len=4000
-      CLANGVERSION: 15
+      CLANGVERSION: 19
       # which optimization level to use for the sanitizer build (see build_fuzzer.variants.sh)
       OPTLEVEL: -O3
 
@@ -34,17 +40,18 @@ jobs:
         sudo apt update
         sudo apt-get install --quiet ninja-build valgrind zip unzip lsb-release wget software-properties-common gnupg
         wget https://apt.llvm.org/llvm.sh
+        sudo apt-get purge --auto-remove llvm python3-lldb-15 llvm-15
         chmod +x llvm.sh
         sudo ./llvm.sh $CLANGVERSION
 
-    - uses: actions/checkout@v3
+    - uses: actions/checkout@v6
 
-    - uses: actions/cache@v3
+    - uses: actions/cache@v5
       with:
         path: dependencies/.cache
         key: ${{ hashFiles('dependencies/CMakeLists.txt') }}
 
-    - uses: actions/cache@v3
+    - uses: actions/cache@v5
       id: cache-corpus
       with:
         path: out/
@@ -124,12 +131,15 @@ jobs:
         done
 
     - name: Save the corpus as a github artifact
-      uses: actions/upload-artifact@v3
+      uses: actions/upload-artifact@v4
       with:
         name: corpus
         path: corpus.tar
 
+    # The corpus server is not always reachable from the runners: a failed
+    # upload should not fail the job, nor skip the valgrind step below.
     - name: Store the corpus externally
+      continue-on-error: true
       run: |
         gzip --keep corpus.tar
         curl -F"filedata=@corpus.tar.gz" https://simdjson:${{ secrets.fuzzdatapassword }}@www.pauldreik.se/fuzzdata/index.php
@@ -147,7 +157,7 @@ jobs:
       run: tar cf valgrind.tar valgrind-*.txt
 
     - name: Save valgrind output as a github artifact
-      uses: actions/upload-artifact@v3
+      uses: actions/upload-artifact@v4
       if: always()
       with:
         name: valgrindresults
@@ -155,7 +165,7 @@ jobs:
         if-no-files-found: ignore
 
     - name: Archive any crashes as an artifact
-      uses: actions/upload-artifact@v3
+      uses: actions/upload-artifact@v4
       if: always()
       with:
         name: crashes

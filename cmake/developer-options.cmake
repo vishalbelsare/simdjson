@@ -2,7 +2,10 @@
 # Flags used by exes and by the simdjson library (project-wide flags)
 #
 add_library(simdjson-internal-flags INTERFACE)
-
+if(NOT DEFINED CMAKE_POSITION_INDEPENDENT_CODE)
+  # We default to ON for all targets, so that we can use the library in shared libraries.
+  set_target_properties(simdjson-internal-flags PROPERTIES INTERFACE_POSITION_INDEPENDENT_CODE ON)
+endif(NOT DEFINED CMAKE_POSITION_INDEPENDENT_CODE)
 
 option(SIMDJSON_CHECK_EOF "Check for the end of the input buffer. The setting is unnecessary since we require padding of the inputs. You should expect tests to fail with this option turned on." OFF)
 if(SIMDJSON_CHECK_EOF)
@@ -29,6 +32,9 @@ undefined behavior.")
     link_libraries(
         -fsanitize=address -fno-omit-frame-pointer -fno-sanitize-recover=all
     )
+  elseif (CMAKE_CXX_COMPILER_ID STREQUAL "MSVC")
+    add_compile_options(-fsanitize=address)
+    link_libraries(-fsanitize=address)
   else()
     message(
         STATUS
@@ -51,7 +57,6 @@ undefined behavior.")
 endif()
 
 option(SIMDJSON_SANITIZE_MEMORY "Sanitize memory" OFF)
-
 
 if(SIMDJSON_SANITIZE_MEMORY)
   message(STATUS "Setting the memory sanitizer.")
@@ -110,21 +115,29 @@ endif()
 
 # We compile tools, tests, etc. with C++ 17. Override yourself if you need on a
 # target.
-set(SIMDJSON_CXX_STANDARD 17 CACHE STRING "the C++ standard to use for simdjson")
-set(CMAKE_CXX_STANDARD ${SIMDJSON_CXX_STANDARD})
+if(SIMDJSON_STATIC_REFLECTION_ENABLED)
+  # Reflection needs C++26. When the user asked for it explicitly the language
+  # mode comes from the -std=c++26 flag added in the top-level CMakeLists; when
+  # it was detected, the user already selected the language mode themselves. In
+  # both cases we must not overwrite CMAKE_CXX_STANDARD here.
+  set(SIMDJSON_CXX_STANDARD 26 CACHE STRING "the C++ standard to use for simdjson")
+else()
+  set(SIMDJSON_CXX_STANDARD 17 CACHE STRING "the C++ standard to use for simdjson")
+  # Respect a standard the user selected explicitly.
+  if(NOT DEFINED CMAKE_CXX_STANDARD)
+    set(CMAKE_CXX_STANDARD ${SIMDJSON_CXX_STANDARD})
+  endif()
+endif()
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
-set(CMAKE_MACOSX_RPATH OFF)
 set(CMAKE_THREAD_PREFER_PTHREAD ON)
 set(THREADS_PREFER_PTHREAD_FLAG ON)
+set(SIMDJSON_STRUCTURAL_INDEXER_STEP CACHE STRING "the SIMDJSON_STRUCTURAL_INDEXER_STEP variable")
 
-# LTO seems to create all sorts of fun problems. Let us
-# disable temporarily.
-#include(CheckIPOSupported)
-#check_ipo_supported(RESULT ltoresult)
-#if(ltoresult)
-#  set(CMAKE_INTERPROCEDURAL_OPTIMIZATION TRUE)
-#endif()
+if(SIMDJSON_STRUCTURAL_INDEXER_STEP)
+  message(STATUS "Setting SIMDJSON_STRUCTURAL_INDEXER_STEP to ${SIMDJSON_STRUCTURAL_INDEXER_STEP}.")
+  add_compile_definitions(SIMDJSON_STRUCTURAL_INDEXER_STEP=${SIMDJSON_STRUCTURAL_INDEXER_STEP})
+endif()
 
 option(SIMDJSON_VISUAL_STUDIO_BUILD_WITH_DEBUG_INFO_FOR_PROFILING "\
 Under Visual Studio, add Zi to the compile flag and DEBUG to the link file to \
@@ -154,14 +167,20 @@ We recommend Visual Studio 2019 or better on a 64-bit system.")
     add_compile_options(/Zi)
   endif()
 else()
-  if(NOT WIN32)
-    target_compile_options(simdjson-internal-flags INTERFACE -fPIC)
-  endif()
   target_compile_options(
       simdjson-internal-flags INTERFACE
       -Werror -Wall -Wextra -Weffc++ -Wsign-compare -Wshadow -Wwrite-strings
       -Wpointer-arith -Winit-self -Wconversion -Wno-sign-conversion
   )
+  if(CMAKE_CXX_STANDARD VERSION_GREATER_EQUAL 20)
+    target_compile_options(simdjson-internal-flags INTERFACE -Wctad-maybe-unsupported)
+  endif()
+  if(NOT SIMDJSON_EXCEPTIONS)
+    # Compile the tests without exceptions too, so that the headers are
+    # checked the way users with -fno-exceptions consume them.
+    target_compile_options(simdjson-internal-flags INTERFACE -fno-exceptions)
+  endif()
+
 endif()
 
 option(SIMDJSON_GLIBCXX_ASSERTIONS "Set _GLIBCXX_ASSERTIONS" OFF)

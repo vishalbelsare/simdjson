@@ -1,6 +1,7 @@
 #include "simdjson.h"
 #include "test_ondemand.h"
 #include <string>
+using namespace std::string_literals;
 
 using namespace simdjson;
 
@@ -163,8 +164,7 @@ namespace json_pointer_tests {
         ASSERT_TRUE(is_scalar);
         ASSERT_ERROR(doc.at_pointer("").get(val), simdjson::SCALAR_DOCUMENT_AS_VALUE);
         std::cout << "  checking true"<< std::endl;
-        ASSERT_SUCCESS(parser.iterate(true_json).get(doc));
-        ASSERT_SUCCESS(doc.is_scalar().get(is_scalar));
+        ASSERT_SUCCESS(parser.iterate(true_json).is_scalar().get(is_scalar));
         ASSERT_TRUE(is_scalar);
         ASSERT_ERROR(doc.at_pointer("").get(val), simdjson::SCALAR_DOCUMENT_AS_VALUE);
         std::cout << "  checking object"<< std::endl;
@@ -195,7 +195,7 @@ namespace json_pointer_tests {
         ASSERT_SUCCESS(parser.iterate(cars_json).get(cars));
         for (int i = 0; i < 3; i++) {
             double x;
-            std::string json_pointer = std::string("/") + std::to_string(i) + std::string("/tire_pressure/1");
+            std::string json_pointer = "/"s + std::to_string(i) + "/tire_pressure/1"s;
             ASSERT_SUCCESS(cars.at_pointer(json_pointer).get(x));
             measured.push_back(x);
         }
@@ -315,7 +315,7 @@ namespace json_pointer_tests {
         std::vector<car_type> content;
         for (int i = 0; i < 3; i++) {
             ondemand::object obj;
-            std::string json_pointer = std::string("/") + std::to_string(i);
+            std::string json_pointer = "/"s + std::to_string(i);
             // Each successive at_pointer call invalidates
             // previously parsed values, strings, objects and array.
             ASSERT_SUCCESS(cars.at_pointer(json_pointer).get(obj));
@@ -360,7 +360,7 @@ namespace json_pointer_tests {
         ondemand::document cars = parser.iterate(cars_json);
         std::vector<car_type> content;
         for (int i = 0; i < 3; i++) {
-            std::string json_pointer = std::string("/") + std::to_string(i);
+            std::string json_pointer = "/"s + std::to_string(i);
             // Each successive at_pointer call invalidates
             // previously parsed values, strings, objects and array.
             ondemand::object obj(cars.at_pointer(json_pointer).get_object());
@@ -384,8 +384,146 @@ namespace json_pointer_tests {
         TEST_SUCCEED();
     }
 #endif
+
+    bool empty_pointer_on_containers() {
+        TEST_START();
+        auto json = R"({"a":[1,2],"b":{"c":3}})"_padded;
+        ondemand::parser parser;
+        ondemand::document doc;
+        ondemand::object obj;
+        ondemand::array arr;
+        ondemand::value val;
+        // A default-constructed std::string_view has a null data(): reading
+        // json_pointer[0] used to crash here.
+        ASSERT_SUCCESS(parser.iterate(json).get(doc));
+        ASSERT_SUCCESS(doc.get_object().get(obj));
+        ASSERT_ERROR(obj.at_pointer(std::string_view{}).get(val), INVALID_JSON_POINTER);
+        ASSERT_SUCCESS(parser.iterate(json).get(doc));
+        ASSERT_SUCCESS(doc["a"].get_array().get(arr));
+        ASSERT_ERROR(arr.at_pointer(std::string_view{}).get(val), INVALID_JSON_POINTER);
+        ASSERT_ERROR(arr.at_pointer("").get(val), INVALID_JSON_POINTER);
+        // On a value, the empty pointer refers to the value itself (RFC 6901).
+        ondemand::value b;
+        std::string_view raw;
+        ASSERT_SUCCESS(parser.iterate(json).get(doc));
+        ASSERT_SUCCESS(doc["b"].get(b));
+        ASSERT_SUCCESS(b.at_pointer(std::string_view{}).get(val));
+        ASSERT_SUCCESS(val.raw_json().get(raw));
+        ASSERT_EQUAL(raw, R"({"c":3})");
+        ASSERT_SUCCESS(parser.iterate(json).get(doc));
+        ASSERT_SUCCESS(doc["a"].get(b));
+        ASSERT_SUCCESS(b.at_pointer("").get(val));
+        ASSERT_SUCCESS(val.raw_json().get(raw));
+        ASSERT_EQUAL(raw, "[1,2]");
+        TEST_SUCCEED();
+    }
+
+    bool issue2154() { // mistakenly taking value as path should not raise INVALID_JSON_POINTER
+#if SIMDJSON_EXCEPTIONS
+      std::cout << "issue 2154" << std::endl;
+      auto example_json = R"__({
+            "obj": {
+                "s": "42",
+                "n": 42,
+                "f": 4.2
+            }
+        })__"_padded;
+        ondemand::parser parser;
+        ondemand::document doc;
+        ASSERT_SUCCESS(parser.iterate(example_json).get(doc));
+        std::string_view sfield = doc.at_pointer("/obj/s");
+        ASSERT_EQUAL(sfield, "42");
+        int64_t nfield = doc.at_pointer("/obj/n");
+        ASSERT_EQUAL(nfield, 42);
+        ASSERT_ERROR(doc.at_pointer("/obj/X/42").error(), NO_SUCH_FIELD);
+        ASSERT_ERROR(doc.at_pointer("/obj/s/42").error(), NO_SUCH_FIELD);
+        ASSERT_ERROR(doc.at_pointer("/obj/n/42").error(), NO_SUCH_FIELD);
+        ASSERT_ERROR(doc.at_pointer("/obj/f/4.2").error(), NO_SUCH_FIELD);
+        ASSERT_ERROR(doc.at_pointer("/obj/f/4~").error(), INVALID_JSON_POINTER);
+        ASSERT_ERROR(doc.at_pointer("/obj/f/~").error(), INVALID_JSON_POINTER);
+        ASSERT_ERROR(doc.at_pointer("/obj/f/~1").error(), NO_SUCH_FIELD);
+#endif
+      return true;
+    }
+
+    // OSS-Fuzz 573717767: with SIMDJSON_DEVELOPMENT_CHECKS, walking a
+    // document nested deeper than max_depth() overflowed the buffer that
+    // records where each open container starts (an assertion failure).
+    // It must report DEPTH_ERROR instead, as the DOM parser does.
+    bool deeply_nested_pointer() {
+        TEST_START();
+        const size_t depth_limit = 16;
+        for (size_t n : {depth_limit - 1, depth_limit, depth_limit + 1}) {
+            std::string json = std::string(n, '[') + "1" + std::string(n, ']');
+            std::string pointer;
+            std::string path;
+            for (size_t i = 0; i < n; i++) { pointer += "/0"; path += ".0"; }
+            auto padded = padded_string(json);
+            ondemand::parser parser;
+            ASSERT_SUCCESS(parser.allocate(padded.size(), depth_limit));
+            ondemand::document doc;
+            int64_t x;
+            ASSERT_SUCCESS(parser.iterate(padded).get(doc));
+            auto by_pointer = doc.at_pointer(pointer).get_int64().get(x);
+            ASSERT_SUCCESS(parser.iterate(padded).get(doc));
+            auto by_path = doc.at_path(path).get_int64().get(x);
+#if SIMDJSON_DEVELOPMENT_CHECKS
+            // The root container is at depth 1: max_depth() - 1 levels fit.
+            error_code expected = n < depth_limit ? SUCCESS : DEPTH_ERROR;
+#else
+            error_code expected = SUCCESS;
+#endif
+            ASSERT_ERROR(by_pointer, expected);
+            ASSERT_ERROR(by_path, expected);
+        }
+        TEST_SUCCEED();
+    }
+
+    // A structural error abandons the document: is_alive() becomes false and
+    // the iterator lets go of the parser. at_pointer() rewinds the document on
+    // each call and used to read the parser through the abandoned iterator. It
+    // must report the error instead, whichever lookup comes next.
+    bool at_pointer_after_fatal_error() {
+        TEST_START();
+        ondemand::parser parser;
+        ondemand::document doc;
+        ondemand::value val;
+        int64_t x;
+        auto missing_colon = R"({"a";1,"b":2})"_padded;
+        ASSERT_SUCCESS(parser.iterate(missing_colon).get(doc));
+        ASSERT_ERROR(doc.at_pointer("/a").get(val), TAPE_ERROR);
+        ASSERT_FALSE(doc.is_alive());
+        ASSERT_ERROR(doc.at_pointer("/b").get(val), TAPE_ERROR);
+        ASSERT_ERROR(doc.at_pointer("").get(val), TAPE_ERROR);
+        doc.rewind();
+        ASSERT_FALSE(doc.is_alive());
+        ASSERT_ERROR(doc.at_pointer("/b").get(val), TAPE_ERROR);
+        ondemand::document_reference ref(doc);
+        ASSERT_ERROR(ref.at_pointer("/b").get(val), TAPE_ERROR);
+        auto missing_comma = R"({"a":1 "b":2})"_padded;
+        ASSERT_SUCCESS(parser.iterate(missing_comma).get(doc));
+        ASSERT_SUCCESS(doc.at_pointer("/a").get_int64().get(x));
+        ASSERT_EQUAL(x, 1);
+        ASSERT_ERROR(doc.at_pointer("/b").get(val), TAPE_ERROR);
+        ASSERT_FALSE(doc.is_alive());
+        ASSERT_ERROR(doc.at_pointer("/a").get(val), TAPE_ERROR);
+        auto unclosed = R"({"a":1,"b":2)"_padded;
+        ASSERT_SUCCESS(parser.iterate(unclosed).get(doc));
+        ASSERT_ERROR(doc.at_pointer("/a").get(val), INCOMPLETE_ARRAY_OR_OBJECT);
+        ASSERT_FALSE(doc.is_alive());
+        ASSERT_ERROR(doc.at_pointer("/b").get(val), INCOMPLETE_ARRAY_OR_OBJECT);
+        // A document that was never iterated has nothing to rewind either.
+        ondemand::document empty_doc;
+        ASSERT_ERROR(empty_doc.at_pointer("/a").get(val), UNINITIALIZED);
+        TEST_SUCCEED();
+    }
+
     bool run() {
         return
+                issue2154() &&
+                at_pointer_after_fatal_error() &&
+                empty_pointer_on_containers() &&
+                deeply_nested_pointer() &&
 #if SIMDJSON_EXCEPTIONS
                 json_pointer_invalidation_exceptions() &&
 #endif
@@ -479,6 +617,7 @@ namespace json_pointer_tests {
                 run_failure_test(TEST_JSON, "/~01abc", NO_SUCH_FIELD) &&
                 run_failure_test(TEST_JSON, "/~1~001abc/01", INVALID_JSON_POINTER) &&
                 run_failure_test(TEST_JSON, "/~1~001abc/", INVALID_JSON_POINTER) &&
+                run_failure_test(TEST_JSON, "/~1~001abc/18446744073709551616", INDEX_OUT_OF_BOUNDS) &&
                 run_failure_test(TEST_JSON, "/~1~001abc/-", INDEX_OUT_OF_BOUNDS) &&
                 many_json_pointers() &&
                 document_as_scalar() &&

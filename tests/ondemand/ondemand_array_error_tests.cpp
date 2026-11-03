@@ -102,7 +102,7 @@ namespace array_error_tests {
     ONDEMAND_SUBTEST("unclosed extra comma", R"({ "a": [,)",  assert_iterate(doc["a"],                 { INCOMPLETE_ARRAY_OR_OBJECT }));
     ONDEMAND_SUBTEST("unclosed extra comma", R"({ "a": [,,)", assert_iterate(doc["a"],                 { INCOMPLETE_ARRAY_OR_OBJECT }));
     ONDEMAND_SUBTEST("unclosed     ", R"({ "a": [1 )",        assert_iterate(doc["a"],                 { INCOMPLETE_ARRAY_OR_OBJECT }));
-    // TODO These pass the user values that may run past the end of the buffer if they aren't careful
+    // TODO These pass the user values that may run past the end of the buffer if they are not careful
     // In particular, if the padding is decorated with the wrong values, we could cause overrun!
     ONDEMAND_SUBTEST("unclosed     ", R"({ "a": [1,)",        assert_iterate(doc["a"],                 { INCOMPLETE_ARRAY_OR_OBJECT }));
     ONDEMAND_SUBTEST("unclosed     ", R"({ "a": [1)",         assert_iterate(doc["a"],                 { INCOMPLETE_ARRAY_OR_OBJECT }));
@@ -194,6 +194,96 @@ namespace array_error_tests {
     }));
     TEST_SUCCEED();
   }
+  bool reentrant_array_access_during_iteration_error() {
+    TEST_START();
+    auto json = R"([ 1, 2, 3 ])"_padded;
+    SUBTEST("at mid-loop", test_ondemand_doc(json, [&](auto doc) {
+      ondemand::array arr;
+      ASSERT_SUCCESS( doc.get(arr) );
+      for (auto element : arr) {
+        ASSERT_SUCCESS(element);
+        ASSERT_ERROR( arr.at(1), OUT_OF_ORDER_ITERATION );
+        break;
+      }
+      return true;
+    }));
+    SUBTEST("count_elements mid-loop", test_ondemand_doc(json, [&](auto doc) {
+      ondemand::array arr;
+      ASSERT_SUCCESS( doc.get(arr) );
+      for (auto element : arr) {
+        ASSERT_SUCCESS(element);
+        ASSERT_ERROR( arr.count_elements(), OUT_OF_ORDER_ITERATION );
+        break;
+      }
+      return true;
+    }));
+    SUBTEST("is_empty mid-loop", test_ondemand_doc(json, [&](auto doc) {
+      ondemand::array arr;
+      ASSERT_SUCCESS( doc.get(arr) );
+      for (auto element : arr) {
+        ASSERT_SUCCESS(element);
+        ASSERT_ERROR( arr.is_empty(), OUT_OF_ORDER_ITERATION );
+        break;
+      }
+      return true;
+    }));
+    SUBTEST("reset mid-loop", test_ondemand_doc(json, [&](auto doc) {
+      ondemand::array arr;
+      ASSERT_SUCCESS( doc.get(arr) );
+      for (auto element : arr) {
+        ASSERT_SUCCESS(element);
+        ASSERT_ERROR( arr.reset(), OUT_OF_ORDER_ITERATION );
+        break;
+      }
+      return true;
+    }));
+    SUBTEST("usable again after the loop", test_ondemand_doc(json, [&](auto doc) {
+      ondemand::array arr;
+      ASSERT_SUCCESS( doc.get(arr) );
+      for (auto element : arr) { ASSERT_SUCCESS(element); }
+      ASSERT_SUCCESS( arr.reset() );
+      size_t count;
+      ASSERT_SUCCESS( arr.count_elements().get(count) );
+      ASSERT_EQUAL( count, 3 );
+      return true;
+    }));
+    TEST_SUCCEED();
+  }
+
+  // An iterator taken from a temporary array must not lock it: the temporary is
+  // gone by the time the iterator is destroyed (ASan: stack-use-after-scope).
+  bool iterator_from_temporary_array() {
+    TEST_START();
+    auto json = R"({ "a": [ 1, 2, 3 ] })"_padded;
+    SUBTEST("simdjson_result<array> temporary", test_ondemand_doc(json, [&](auto doc) {
+      auto it = doc["a"].get_array().begin();
+      ASSERT_SUCCESS( it );
+      int64_t x;
+      ASSERT_SUCCESS( (*it).get_int64().get(x) );
+      ASSERT_EQUAL( x, 1 );
+      return true;
+    }));
+    SUBTEST("array temporary", test_ondemand_doc(json, [&](auto doc) {
+      ondemand::array arr;
+      ASSERT_SUCCESS( doc["a"].get(arr) );
+      auto it = ondemand::array(arr).begin();
+      ASSERT_SUCCESS( it );
+      int64_t x;
+      ASSERT_SUCCESS( (*it).get_int64().get(x) );
+      ASSERT_EQUAL( x, 1 );
+      return true;
+    }));
+    SUBTEST("named simdjson_result<array> still locks", test_ondemand_doc(json, [&](auto doc) {
+      auto arr = doc["a"].get_array();
+      for (auto element : arr) {
+        ASSERT_SUCCESS(element);
+        ASSERT_ERROR( arr.at(1), OUT_OF_ORDER_ITERATION );
+        break;
+      }
+      return true;
+    }));
+    TEST_SUCCEED();
+  }
 #endif // SIMDJSON_DEVELOPMENT_CHECKS
 
   bool run() {
@@ -206,6 +296,8 @@ namespace array_error_tests {
 #ifdef SIMDJSON_DEVELOPMENT_CHECKS
            out_of_order_array_iteration_error() &&
            out_of_order_top_level_array_iteration_error() &&
+           reentrant_array_access_during_iteration_error() &&
+           iterator_from_temporary_array() &&
 #endif
            true;
   }

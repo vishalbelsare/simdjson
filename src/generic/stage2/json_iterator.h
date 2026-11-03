@@ -1,4 +1,11 @@
-#include "generic/stage2/logger.h"
+#ifndef SIMDJSON_SRC_GENERIC_STAGE2_JSON_ITERATOR_H
+
+#ifndef SIMDJSON_CONDITIONAL_INCLUDE
+#define SIMDJSON_SRC_GENERIC_STAGE2_JSON_ITERATOR_H
+#include <generic/stage2/base.h>
+#include <generic/stage2/logger.h>
+#include <simdjson/generic/dom_parser_implementation.h>
+#endif // SIMDJSON_CONDITIONAL_INCLUDE
 
 namespace simdjson {
 namespace SIMDJSON_IMPLEMENTATION {
@@ -35,7 +42,7 @@ public:
    *
    * - increment_count(iter) - each time a value is found in an array or object.
    */
-  template<bool STREAMING, typename V>
+  template<bool STREAMING, bool UNPADDED, bool BOUNDED = false, typename V>
   simdjson_warn_unused simdjson_inline error_code walk_document(V &visitor) noexcept;
 
   /**
@@ -52,7 +59,8 @@ public:
    *
    * They may include invalid JSON as well (such as `1.2.3` or `ture`).
    */
-  simdjson_inline const uint8_t *peek() const noexcept;
+  template<bool UNPADDED, bool BOUNDED = false>
+  simdjson_inline const uint8_t *peek(const uint32_t *batch_end = nullptr) const noexcept;
   /**
    * Advance to the next token.
    *
@@ -60,7 +68,8 @@ public:
    *
    * They may include invalid JSON as well (such as `1.2.3` or `ture`).
    */
-  simdjson_inline const uint8_t *advance() noexcept;
+  template<bool UNPADDED, bool BOUNDED = false>
+  simdjson_inline const uint8_t *advance(const uint32_t *batch_end = nullptr) noexcept;
   /**
    * Get the remaining length of the document, from the start of the current token.
    */
@@ -108,7 +117,7 @@ public:
   simdjson_warn_unused simdjson_inline error_code visit_primitive(V &visitor, const uint8_t *value) noexcept;
 };
 
-template<bool STREAMING, typename V>
+template<bool STREAMING, bool UNPADDED, bool BOUNDED, typename V>
 simdjson_warn_unused simdjson_inline error_code json_iterator::walk_document(V &visitor) noexcept {
   logger::log_start();
 
@@ -116,6 +125,9 @@ simdjson_warn_unused simdjson_inline error_code json_iterator::walk_document(V &
   // Start the document
   //
   if (at_eof()) { return EMPTY; }
+  // Only used when BOUNDED (see advance()); a local, so that it can stay in a
+  // register, and vanishes from the other walks.
+  const uint32_t *const batch_end = &dom_parser.structural_indexes[dom_parser.n_structural_indexes];
   log_start_value("document");
   SIMDJSON_TRY( visitor.visit_document_start(*this) );
 
@@ -123,7 +135,7 @@ simdjson_warn_unused simdjson_inline error_code json_iterator::walk_document(V &
   // Read first value
   //
   {
-    auto value = advance();
+    auto value = advance<UNPADDED, BOUNDED>(batch_end);
 
     // Make sure the outer object or array is closed before continuing; otherwise, there are ways we
     // could get into memory corruption. See https://github.com/simdjson/simdjson/issues/906
@@ -135,8 +147,8 @@ simdjson_warn_unused simdjson_inline error_code json_iterator::walk_document(V &
     }
 
     switch (*value) {
-      case '{': if (*peek() == '}') { advance(); log_value("empty object"); SIMDJSON_TRY( visitor.visit_empty_object(*this) ); break; } goto object_begin;
-      case '[': if (*peek() == ']') { advance(); log_value("empty array"); SIMDJSON_TRY( visitor.visit_empty_array(*this) ); break; } goto array_begin;
+      case '{': if (*peek<UNPADDED, BOUNDED>(batch_end) == '}') { advance<UNPADDED, BOUNDED>(batch_end); log_value("empty object"); SIMDJSON_TRY( visitor.visit_empty_object(*this) ); break; } goto object_begin;
+      case '[': if (*peek<UNPADDED, BOUNDED>(batch_end) == ']') { advance<UNPADDED, BOUNDED>(batch_end); log_value("empty array"); SIMDJSON_TRY( visitor.visit_empty_array(*this) ); break; } goto array_begin;
       default: SIMDJSON_TRY( visitor.visit_root_primitive(*this, value) ); break;
     }
   }
@@ -153,29 +165,29 @@ object_begin:
   SIMDJSON_TRY( visitor.visit_object_start(*this) );
 
   {
-    auto key = advance();
+    auto key = advance<UNPADDED, BOUNDED>(batch_end);
     if (*key != '"') { log_error("Object does not start with a key"); return TAPE_ERROR; }
     SIMDJSON_TRY( visitor.increment_count(*this) );
     SIMDJSON_TRY( visitor.visit_key(*this, key) );
   }
 
 object_field:
-  if (simdjson_unlikely( *advance() != ':' )) { log_error("Missing colon after key in object"); return TAPE_ERROR; }
+  if (simdjson_unlikely( (*advance<UNPADDED, BOUNDED>(batch_end) != ':') )) { log_error("Missing colon after key in object"); return TAPE_ERROR; }
   {
-    auto value = advance();
+    auto value = advance<UNPADDED, BOUNDED>(batch_end);
     switch (*value) {
-      case '{': if (*peek() == '}') { advance(); log_value("empty object"); SIMDJSON_TRY( visitor.visit_empty_object(*this) ); break; } goto object_begin;
-      case '[': if (*peek() == ']') { advance(); log_value("empty array"); SIMDJSON_TRY( visitor.visit_empty_array(*this) ); break; } goto array_begin;
+      case '{': if (*peek<UNPADDED, BOUNDED>(batch_end) == '}') { advance<UNPADDED, BOUNDED>(batch_end); log_value("empty object"); SIMDJSON_TRY( visitor.visit_empty_object(*this) ); break; } goto object_begin;
+      case '[': if (*peek<UNPADDED, BOUNDED>(batch_end) == ']') { advance<UNPADDED, BOUNDED>(batch_end); log_value("empty array"); SIMDJSON_TRY( visitor.visit_empty_array(*this) ); break; } goto array_begin;
       default: SIMDJSON_TRY( visitor.visit_primitive(*this, value) ); break;
     }
   }
 
 object_continue:
-  switch (*advance()) {
+  switch (*advance<UNPADDED, BOUNDED>(batch_end)) {
     case ',':
       SIMDJSON_TRY( visitor.increment_count(*this) );
       {
-        auto key = advance();
+        auto key = advance<UNPADDED, BOUNDED>(batch_end);
         if (simdjson_unlikely( *key != '"' )) { log_error("Key string missing at beginning of field in object"); return TAPE_ERROR; }
         SIMDJSON_TRY( visitor.visit_key(*this, key) );
       }
@@ -203,16 +215,16 @@ array_begin:
 
 array_value:
   {
-    auto value = advance();
+    auto value = advance<UNPADDED, BOUNDED>(batch_end);
     switch (*value) {
-      case '{': if (*peek() == '}') { advance(); log_value("empty object"); SIMDJSON_TRY( visitor.visit_empty_object(*this) ); break; } goto object_begin;
-      case '[': if (*peek() == ']') { advance(); log_value("empty array"); SIMDJSON_TRY( visitor.visit_empty_array(*this) ); break; } goto array_begin;
+      case '{': if (*peek<UNPADDED, BOUNDED>(batch_end) == '}') { advance<UNPADDED, BOUNDED>(batch_end); log_value("empty object"); SIMDJSON_TRY( visitor.visit_empty_object(*this) ); break; } goto object_begin;
+      case '[': if (*peek<UNPADDED, BOUNDED>(batch_end) == ']') { advance<UNPADDED, BOUNDED>(batch_end); log_value("empty array"); SIMDJSON_TRY( visitor.visit_empty_array(*this) ); break; } goto array_begin;
       default: SIMDJSON_TRY( visitor.visit_primitive(*this, value) ); break;
     }
   }
 
 array_continue:
-  switch (*advance()) {
+  switch (*advance<UNPADDED, BOUNDED>(batch_end)) {
     case ',': SIMDJSON_TRY( visitor.increment_count(*this) ); goto array_value;
     case ']': log_end_value("array"); SIMDJSON_TRY( visitor.visit_array_end(*this) ); goto scope_end;
     default: log_error("Missing comma between array values"); return TAPE_ERROR;
@@ -240,11 +252,45 @@ simdjson_inline json_iterator::json_iterator(dom_parser_implementation &_dom_par
     dom_parser{_dom_parser} {
 }
 
-simdjson_inline const uint8_t *json_iterator::peek() const noexcept {
-  return &buf[*(next_structural)];
+// Stage 1 leaves a sentinel index of value `len`; reading buf[len] requires
+// padding. For UNPADDED, return a dummy so walk_document can fail cleanly (#2815).
+//
+// When BOUNDED (see dom_parser_implementation::_bounded_batch), a document may
+// not run past batch_end, one past the last structural index of the batch:
+// past it, we return the same dummy, and walk_document fails cleanly.
+template<bool UNPADDED, bool BOUNDED>
+simdjson_inline const uint8_t *json_iterator::peek(const uint32_t *batch_end) const noexcept {
+  SIMDJSON_IF_CONSTEXPR (BOUNDED) {
+    if (simdjson_unlikely(next_structural >= batch_end)) {
+      static constexpr uint8_t streaming_eof_sentinel = 0;
+      return &streaming_eof_sentinel;
+    }
+  }
+  const uint32_t idx = *(next_structural);
+  SIMDJSON_IF_CONSTEXPR (UNPADDED) {
+    if (simdjson_unlikely(idx >= dom_parser.len)) {
+      static constexpr uint8_t unpadded_eof_sentinel = 0;
+      return &unpadded_eof_sentinel;
+    }
+  }
+  return &buf[idx];
 }
-simdjson_inline const uint8_t *json_iterator::advance() noexcept {
-  return &buf[*(next_structural++)];
+template<bool UNPADDED, bool BOUNDED>
+simdjson_inline const uint8_t *json_iterator::advance(const uint32_t *batch_end) noexcept {
+  SIMDJSON_IF_CONSTEXPR (BOUNDED) {
+    if (simdjson_unlikely(next_structural >= batch_end)) {
+      static constexpr uint8_t streaming_eof_sentinel = 0;
+      return &streaming_eof_sentinel;
+    }
+  }
+  const uint32_t idx = *(next_structural++);
+  SIMDJSON_IF_CONSTEXPR (UNPADDED) {
+    if (simdjson_unlikely(idx >= dom_parser.len)) {
+      static constexpr uint8_t unpadded_eof_sentinel = 0;
+      return &unpadded_eof_sentinel;
+    }
+  }
+  return &buf[idx];
 }
 simdjson_inline size_t json_iterator::remaining_len() const noexcept {
   return dom_parser.len - *(next_structural-1);
@@ -284,7 +330,20 @@ simdjson_warn_unused simdjson_inline error_code json_iterator::visit_root_primit
     case '"': return visitor.visit_root_string(*this, value);
     case 't': return visitor.visit_root_true_atom(*this, value);
     case 'f': return visitor.visit_root_false_atom(*this, value);
+#if SIMDJSON_ENABLE_NAN_INF
+    case 'n': {
+      auto err = visitor.visit_root_null_atom(*this, value);
+      if (err == SUCCESS) { return err; }
+      // propagate the error value returned by a bad 'null' atom if parsing 'nan' fails
+      return visitor.visit_root_nan_atom(*this, value, err);
+    }
+    // 'N' isn't a canonically recognized atom, so we return a TAPE_ERROR if failure occurs
+    case 'N': return visitor.visit_root_nan_atom(*this, value, TAPE_ERROR);
+    case 'i':
+    case 'I': return visitor.visit_root_inf_atom(*this, value);
+#else
     case 'n': return visitor.visit_root_null_atom(*this, value);
+#endif
     case '-':
     case '0': case '1': case '2': case '3': case '4':
     case '5': case '6': case '7': case '8': case '9':
@@ -296,15 +355,30 @@ simdjson_warn_unused simdjson_inline error_code json_iterator::visit_root_primit
 }
 template<typename V>
 simdjson_warn_unused simdjson_inline error_code json_iterator::visit_primitive(V &visitor, const uint8_t *value) noexcept {
+  // Use the fact that most scalars are going to be either strings or numbers.
+  if(*value == '"') {
+    return visitor.visit_string(*this, value);
+  } else if (((*value - '0')  < 10) || (*value == '-')) {
+    return visitor.visit_number(*this, value);
+  }
+  // true, false, null are uncommon.
   switch (*value) {
-    case '"': return visitor.visit_string(*this, value);
     case 't': return visitor.visit_true_atom(*this, value);
     case 'f': return visitor.visit_false_atom(*this, value);
+#if SIMDJSON_ENABLE_NAN_INF
+    case 'n': {
+      auto err = visitor.visit_null_atom(*this, value);
+      if (err == SUCCESS) { return err; }
+      // propagate the error value returned by a bad 'null' atom if parsing 'nan' fails
+      return visitor.visit_nan_atom(*this, value, err);
+    }
+    // 'N' isn't a canonically recognized atom, so we return a TAPE_ERROR if failure occurs
+    case 'N': return visitor.visit_nan_atom(*this, value, TAPE_ERROR);
+    case 'i':
+    case 'I': return visitor.visit_inf_atom(*this, value);
+#else
     case 'n': return visitor.visit_null_atom(*this, value);
-    case '-':
-    case '0': case '1': case '2': case '3': case '4':
-    case '5': case '6': case '7': case '8': case '9':
-      return visitor.visit_number(*this, value);
+#endif
     default:
       log_error("Non-value found when value was expected!");
       return TAPE_ERROR;
@@ -315,3 +389,5 @@ simdjson_warn_unused simdjson_inline error_code json_iterator::visit_primitive(V
 } // unnamed namespace
 } // namespace SIMDJSON_IMPLEMENTATION
 } // namespace simdjson
+
+#endif // SIMDJSON_SRC_GENERIC_STAGE2_JSON_ITERATOR_H

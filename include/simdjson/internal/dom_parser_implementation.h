@@ -1,7 +1,7 @@
 #ifndef SIMDJSON_INTERNAL_DOM_PARSER_IMPLEMENTATION_H
 #define SIMDJSON_INTERNAL_DOM_PARSER_IMPLEMENTATION_H
 
-#include "simdjson/common_defs.h"
+#include "simdjson/base.h"
 #include "simdjson/error.h"
 #include <memory>
 
@@ -19,7 +19,12 @@ class document;
 * 3) The stream_final mode allows us to truncate final
 * unterminated strings. It is useful in conjunction with streaming_partial.
 */
-enum class stage1_mode { regular, streaming_partial, streaming_final};
+enum class stage1_mode {
+  regular,
+  streaming_partial, streaming_final,
+  json_sequence_partial, json_sequence_final,
+  comma_delimited_partial, comma_delimited_final
+};
 
 /**
  * Returns true if mode == streaming_partial or mode == streaming_final
@@ -30,7 +35,6 @@ inline bool is_streaming(stage1_mode mode) {
   return (mode != stage1_mode::regular);
   // return (mode == stage1_mode::streaming_partial || mode == stage1_mode::streaming_final);
 }
-
 
 namespace internal {
 
@@ -102,11 +106,28 @@ public:
    */
   simdjson_warn_unused virtual error_code stage2_next(dom::document &doc) noexcept = 0;
 
+  /** @private A stage 2 entry point for parser::parse_many: see stage2_next_function. */
+  typedef error_code (*stage2_next_function_t)(dom_parser_implementation &impl, dom::document &doc);
+
+  /**
+   * @private For internal implementation use
+   *
+   * Get a function that does what stage2_next() does. dom::document_stream picks
+   * it once per batch and calls it for each document of the batch, so that the
+   * choice between the bounded and the unchecked walk costs nothing per document.
+   *
+   * Overridden by each implementation.
+   *
+   * @param bounded Whether the documents must be bounded to the structural
+   *                indexes of the batch (see _bounded_batch).
+   */
+  virtual stage2_next_function_t stage2_next_function(bool bounded) const noexcept = 0;
+
   /**
    * Unescape a valid UTF-8 string from src to dst, stopping at a final unescaped quote. There
    * must be an unescaped quote terminating the string. It returns the final output
    * position as pointer. In case of error (e.g., the string has bad escaped codes),
-   * then null_nullptrptr is returned. It is assumed that the output buffer is large
+   * then null_ptr is returned. It is assumed that the output buffer is large
    * enough. E.g., if src points at 'joe"', then dst needs to have four free bytes +
    * SIMDJSON_PADDING bytes.
    *
@@ -123,7 +144,7 @@ public:
    * Unescape a NON-valid UTF-8 string from src to dst, stopping at a final unescaped quote. There
    * must be an unescaped quote terminating the string. It returns the final output
    * position as pointer. In case of error (e.g., the string has bad escaped codes),
-   * then null_nullptrptr is returned. It is assumed that the output buffer is large
+   * then null_ptr is returned. It is assumed that the output buffer is large
    * enough. E.g., if src points at 'joe"', then dst needs to have four free bytes +
    * SIMDJSON_PADDING bytes.
    *
@@ -177,14 +198,14 @@ public:
    *
    * @return Current capacity, in bytes.
    */
-  simdjson_inline size_t capacity() const noexcept;
+  simdjson_pure simdjson_inline size_t capacity() const noexcept;
 
   /**
    * The maximum level of nested object and arrays supported by this parser.
    *
    * @return Maximum depth, in bytes.
    */
-  simdjson_inline size_t max_depth() const noexcept;
+  simdjson_pure simdjson_inline size_t max_depth() const noexcept;
 
   /**
    * Ensure this parser has enough memory to process JSON documents up to `capacity` bytes in length
@@ -212,6 +233,30 @@ protected:
    */
   size_t _max_depth{0};
 
+public:
+  /** Whether to store big integers as strings instead of returning BIGINT_ERROR */
+  bool _number_as_string{false};
+
+  /**
+   * Whether the input buffer passed to parse() is *not* padded to len +
+   * SIMDJSON_PADDING bytes. When true, stage 2 string parsing avoids reading
+   * past buf+len (it finishes the final, near-the-end bytes from a small padded
+   * scratch buffer). This is set only by the no-padding DOM parse entry points
+   * (dom::parser::parse_unpadded); the default padded fast path leaves it false
+   * and is unaffected.
+   */
+  bool _unpadded{false};
+
+  /**
+   * Whether stage 2 must bound the documents of the batch indexed by the last
+   * stage 1 run to its structural indexes (dom::document_stream sets it, see
+   * document_stream::run_stage1, and passes it to stage2_next_function). Other
+   * batches keep the unchecked walk.
+   */
+  bool _bounded_batch{false};
+
+protected:
+
   // Declaring these so that subclasses can use them to implement their constructors.
   simdjson_inline dom_parser_implementation() noexcept;
   simdjson_inline dom_parser_implementation(dom_parser_implementation &&other) noexcept;
@@ -225,11 +270,11 @@ simdjson_inline dom_parser_implementation::dom_parser_implementation() noexcept 
 simdjson_inline dom_parser_implementation::dom_parser_implementation(dom_parser_implementation &&other) noexcept = default;
 simdjson_inline dom_parser_implementation &dom_parser_implementation::operator=(dom_parser_implementation &&other) noexcept = default;
 
-simdjson_inline size_t dom_parser_implementation::capacity() const noexcept {
+simdjson_pure simdjson_inline size_t dom_parser_implementation::capacity() const noexcept {
   return _capacity;
 }
 
-simdjson_inline size_t dom_parser_implementation::max_depth() const noexcept {
+simdjson_pure simdjson_inline size_t dom_parser_implementation::max_depth() const noexcept {
   return _max_depth;
 }
 

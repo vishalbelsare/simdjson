@@ -6,6 +6,15 @@ using namespace simdjson;
 namespace error_tests {
   using namespace std;
 
+  bool issue2120() {
+    TEST_START();
+    ondemand::parser parser;
+    size_t bad_capacity = 0;
+    ondemand::document doc;
+    ASSERT_ERROR( parser.iterate("{\"a\": 0 }", bad_capacity).get(doc), INSUFFICIENT_PADDING);
+    TEST_SUCCEED();
+  }
+
   bool badbadjson() {
     TEST_START();
     ondemand::parser parser;
@@ -79,6 +88,25 @@ namespace error_tests {
     auto error = doc.count_fields().get(cnt);
     return error != simdjson::SUCCESS;
   }
+  bool skip_child_incomplete_container() {
+    TEST_START();
+    auto check = [](const padded_string &json, simdjson::error_code expected) {
+      ondemand::parser parser;
+      ondemand::document doc;
+      ASSERT_SUCCESS(parser.iterate(json).get(doc));
+      ASSERT_ERROR(doc.raw_json().error(), expected);
+      return true;
+    };
+    SUBTEST("unclosed array", check("["_padded, INCOMPLETE_ARRAY_OR_OBJECT));
+    SUBTEST("unclosed object", check("{"_padded, INCOMPLETE_ARRAY_OR_OBJECT));
+    SUBTEST("unclosed nested array", check("[[0]"_padded, INCOMPLETE_ARRAY_OR_OBJECT));
+    SUBTEST("unclosed nested object", check("{\"a\":{}"_padded, INCOMPLETE_ARRAY_OR_OBJECT));
+    SUBTEST("closed array", check("[]"_padded, SUCCESS));
+    SUBTEST("closed object", check("{}"_padded, SUCCESS));
+    SUBTEST("closed nested array", check("[[0]]"_padded, SUCCESS));
+    SUBTEST("closed nested object", check("{\"a\":{}}"_padded, SUCCESS));
+    TEST_SUCCEED();
+  }
   bool empty_document_error() {
     TEST_START();
     ondemand::parser parser;
@@ -97,6 +125,29 @@ namespace error_tests {
     TEST_SUCCEED();
   }
 #if SIMDJSON_EXCEPTIONS
+  // This is a compile-only test
+  struct Class {
+      Class(std::string text)
+          : parser()
+          , doc(parser.iterate(text))
+      {
+      }
+      simdjson::ondemand::parser parser;
+      simdjson::ondemand::document doc;
+  };
+  bool document_in_class() {
+    TEST_START();
+    std::string text = "{}";
+    Class c(text);
+    TEST_SUCCEED();
+  }
+  bool direct_document() {
+    TEST_START();
+    std::string text = "{}";
+    simdjson::ondemand::parser parser;
+    simdjson::ondemand::document doc(parser.iterate(text));
+    TEST_SUCCEED();
+  }
   bool raw_json_string_except() {
     TEST_START();
     ondemand::parser parser;
@@ -139,6 +190,46 @@ namespace error_tests {
     TEST_SUCCEED();
   }
 
+  bool parser_set_max_capacity() {
+    TEST_START();
+    ondemand::parser parser;
+    parser.set_max_capacity(1024 * 1024);
+    ASSERT_EQUAL(parser.max_capacity(), size_t(1024 * 1024));
+    auto json = R"({"k":"xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"})"_padded;
+    ondemand::document doc;
+    ASSERT_SUCCESS(parser.iterate(json).get(doc));
+    TEST_SUCCEED();
+  }
+
+  // An allocate() rejected for its depth leaves the parser as it was: a fresh
+  // parser stays empty and an allocated one keeps its capacity and depth.
+  bool failed_allocate_then_iterate() {
+    TEST_START();
+    auto json = "[1,2,3]"_padded;
+    auto scalar = "1"_padded;
+    const size_t bad_depths[] = { 0, SIMDJSON_MAX_DEPTH + 1 };
+    for (size_t bad_depth : bad_depths) {
+      ondemand::parser parser;
+      ASSERT_ERROR( parser.allocate(1024, bad_depth), CAPACITY );
+      ASSERT_EQUAL( parser.capacity(), 0 );
+      ASSERT_EQUAL( parser.max_depth(), DEFAULT_MAX_DEPTH );
+      ondemand::document doc;
+      ASSERT_SUCCESS( parser.iterate(json).get(doc) );
+      ASSERT_SUCCESS( parser.iterate(scalar).get(doc) );
+    }
+    // A parser that was already allocated keeps its settings.
+    for (size_t bad_depth : bad_depths) {
+      ondemand::parser parser;
+      ASSERT_SUCCESS( parser.allocate(1024, 16) );
+      ASSERT_ERROR( parser.allocate(1024, bad_depth), CAPACITY );
+      ASSERT_EQUAL( parser.capacity(), 1024 );
+      ASSERT_EQUAL( parser.max_depth(), 16 );
+      ondemand::document doc;
+      ASSERT_SUCCESS( parser.iterate(json).get(doc) );
+    }
+    TEST_SUCCEED();
+  }
+
   bool simple_error_example() {
     TEST_START();
     ondemand::parser parser;
@@ -147,6 +238,38 @@ namespace error_tests {
     ASSERT_SUCCESS( parser.iterate(json).get(doc) );
     double x;
     ASSERT_ERROR( doc["bad number"].get_double().get(x), NUMBER_ERROR );
+    TEST_SUCCEED();
+  }
+
+  // An input that ends inside a string gets UNCLOSED_STRING, but that error
+  // must not hide invalid UTF-8 or a control character before it:
+  // iterate_allow_incomplete_json() goes on after UNCLOSED_STRING. A character
+  // cut by the end of the input is part of the unclosed string, not an error.
+  bool unclosed_string_keeps_earlier_errors() {
+    TEST_START();
+    ondemand::parser parser;
+    ondemand::document doc;
+    // Vary the length so that the end falls on each side of a 64-byte block.
+    for (size_t pad = 0; pad < 130; pad++) {
+      const std::string tail = "\",\"b\":\"" + std::string(pad, 'x');
+      const padded_string bad_utf8("{\"a\":\"\xff\xfe" + tail);
+      const padded_string overlong("{\"a\":\"\xc0\xaf" + tail);
+      const padded_string control("{\"a\":\"x\ny" + tail);
+      const padded_string cut("{\"a\":\"\xc3\xa9" + tail + "\xe6\x9d");
+      ASSERT_ERROR( parser.iterate(bad_utf8).get(doc), UTF8_ERROR );
+      ASSERT_ERROR( parser.iterate(overlong).get(doc), UTF8_ERROR );
+      ASSERT_ERROR( parser.iterate(control).get(doc), UNESCAPED_CHARS );
+      ASSERT_ERROR( parser.iterate(cut).get(doc), UNCLOSED_STRING );
+#ifdef SIMDJSON_EXPERIMENTAL_ALLOW_INCOMPLETE_JSON
+      ASSERT_ERROR( parser.iterate_allow_incomplete_json(bad_utf8).get(doc), UTF8_ERROR );
+      ASSERT_ERROR( parser.iterate_allow_incomplete_json(overlong).get(doc), UTF8_ERROR );
+      ASSERT_ERROR( parser.iterate_allow_incomplete_json(control).get(doc), UNESCAPED_CHARS );
+      ASSERT_SUCCESS( parser.iterate_allow_incomplete_json(cut).get(doc) );
+      std::string_view a;
+      ASSERT_SUCCESS( doc["a"].get_string().get(a) );
+      ASSERT_EQUAL( a, "\xc3\xa9" );
+#endif
+    }
     TEST_SUCCEED();
   }
 
@@ -180,7 +303,11 @@ namespace error_tests {
       ASSERT_ERROR( val.get_double(), INCORRECT_TYPE );
       ASSERT_ERROR( val.get_uint64(), INCORRECT_TYPE );
       ASSERT_ERROR( val.get_int64(), INCORRECT_TYPE );
+      ASSERT_ERROR( val.get_uint32(), INCORRECT_TYPE );
+      ASSERT_ERROR( val.get_int32(), INCORRECT_TYPE );
       ASSERT_ERROR( val.get_object(), INCORRECT_TYPE );
+      ASSERT_ERROR( val.get_int32(), INCORRECT_TYPE );
+      ASSERT_ERROR( val.get_uint32(), INCORRECT_TYPE );
       ASSERT_ERROR( val.get_int64(), INCORRECT_TYPE );
       ASSERT_ERROR( val.get_uint64(), INCORRECT_TYPE );
       ASSERT_ERROR( val.get_double(), INCORRECT_TYPE );
@@ -203,7 +330,11 @@ namespace error_tests {
       ASSERT_ERROR( val.get_double(), INCORRECT_TYPE );
       ASSERT_ERROR( val.get_uint64(), INCORRECT_TYPE );
       ASSERT_ERROR( val.get_int64(), INCORRECT_TYPE );
+      ASSERT_ERROR( val.get_uint32(), INCORRECT_TYPE );
+      ASSERT_ERROR( val.get_int32(), INCORRECT_TYPE );
       ASSERT_ERROR( val.get_object(), INCORRECT_TYPE );
+      ASSERT_ERROR( val.get_int32(), INCORRECT_TYPE );
+      ASSERT_ERROR( val.get_uint32(), INCORRECT_TYPE );
       ASSERT_ERROR( val.get_int64(), INCORRECT_TYPE );
       ASSERT_ERROR( val.get_uint64(), INCORRECT_TYPE );
       ASSERT_ERROR( val.get_double(), INCORRECT_TYPE );
@@ -225,7 +356,11 @@ namespace error_tests {
       ASSERT_ERROR( val.get_double(), INCORRECT_TYPE );
       ASSERT_ERROR( val.get_uint64(), INCORRECT_TYPE );
       ASSERT_ERROR( val.get_int64(), INCORRECT_TYPE );
+      ASSERT_ERROR( val.get_uint32(), INCORRECT_TYPE );
+      ASSERT_ERROR( val.get_int32(), INCORRECT_TYPE );
       ASSERT_ERROR( val.get_object(), INCORRECT_TYPE );
+      ASSERT_ERROR( val.get_int32(), INCORRECT_TYPE );
+      ASSERT_ERROR( val.get_uint32(), INCORRECT_TYPE );
       ASSERT_ERROR( val.get_int64(), INCORRECT_TYPE );
       ASSERT_ERROR( val.get_uint64(), INCORRECT_TYPE );
       ASSERT_ERROR( val.get_double(), INCORRECT_TYPE );
@@ -247,7 +382,11 @@ namespace error_tests {
       ASSERT_ERROR( val.get_double(), INCORRECT_TYPE );
       ASSERT_ERROR( val.get_uint64(), INCORRECT_TYPE );
       ASSERT_ERROR( val.get_int64(), INCORRECT_TYPE );
+      ASSERT_ERROR( val.get_uint32(), INCORRECT_TYPE );
+      ASSERT_ERROR( val.get_int32(), INCORRECT_TYPE );
       ASSERT_ERROR( val.get_object(), INCORRECT_TYPE );
+      ASSERT_ERROR( val.get_int32(), INCORRECT_TYPE );
+      ASSERT_ERROR( val.get_uint32(), INCORRECT_TYPE );
       ASSERT_ERROR( val.get_int64(), INCORRECT_TYPE );
       ASSERT_ERROR( val.get_uint64(), INCORRECT_TYPE );
       ASSERT_ERROR( val.get_double(), INCORRECT_TYPE );
@@ -274,7 +413,11 @@ namespace error_tests {
       ASSERT_ERROR( val.get_double(), INCORRECT_TYPE );
       ASSERT_ERROR( val.get_uint64(), INCORRECT_TYPE );
       ASSERT_ERROR( val.get_int64(), INCORRECT_TYPE );
+      ASSERT_ERROR( val.get_uint32(), INCORRECT_TYPE );
+      ASSERT_ERROR( val.get_int32(), INCORRECT_TYPE );
       ASSERT_ERROR( val.get_object(), INCORRECT_TYPE );
+      ASSERT_ERROR( val.get_int32(), INCORRECT_TYPE );
+      ASSERT_ERROR( val.get_uint32(), INCORRECT_TYPE );
       ASSERT_ERROR( val.get_int64(), INCORRECT_TYPE );
       ASSERT_ERROR( val.get_uint64(), INCORRECT_TYPE );
       ASSERT_ERROR( val.get_double(), INCORRECT_TYPE );
@@ -297,7 +440,11 @@ namespace error_tests {
       ASSERT_ERROR( val.get_double(), INCORRECT_TYPE );
       ASSERT_ERROR( val.get_uint64(), INCORRECT_TYPE );
       ASSERT_ERROR( val.get_int64(), INCORRECT_TYPE );
+      ASSERT_ERROR( val.get_uint32(), INCORRECT_TYPE );
+      ASSERT_ERROR( val.get_int32(), INCORRECT_TYPE );
       ASSERT_ERROR( val.get_object(), INCORRECT_TYPE );
+      ASSERT_ERROR( val.get_int32(), INCORRECT_TYPE );
+      ASSERT_ERROR( val.get_uint32(), INCORRECT_TYPE );
       ASSERT_ERROR( val.get_int64(), INCORRECT_TYPE );
       ASSERT_ERROR( val.get_uint64(), INCORRECT_TYPE );
       ASSERT_ERROR( val.get_double(), INCORRECT_TYPE );
@@ -318,7 +465,11 @@ namespace error_tests {
       ASSERT_ERROR( val.get_double(), INCORRECT_TYPE );
       ASSERT_ERROR( val.get_uint64(), INCORRECT_TYPE );
       ASSERT_ERROR( val.get_int64(), INCORRECT_TYPE );
+      ASSERT_ERROR( val.get_uint32(), INCORRECT_TYPE );
+      ASSERT_ERROR( val.get_int32(), INCORRECT_TYPE );
       ASSERT_ERROR( val.get_object(), INCORRECT_TYPE );
+      ASSERT_ERROR( val.get_int32(), INCORRECT_TYPE );
+      ASSERT_ERROR( val.get_uint32(), INCORRECT_TYPE );
       ASSERT_ERROR( val.get_int64(), INCORRECT_TYPE );
       ASSERT_ERROR( val.get_uint64(), INCORRECT_TYPE );
       ASSERT_ERROR( val.get_double(), INCORRECT_TYPE );
@@ -339,7 +490,11 @@ namespace error_tests {
       ASSERT_ERROR( val.get_double(), INCORRECT_TYPE );
       ASSERT_ERROR( val.get_uint64(), INCORRECT_TYPE );
       ASSERT_ERROR( val.get_int64(), INCORRECT_TYPE );
+      ASSERT_ERROR( val.get_uint32(), INCORRECT_TYPE );
+      ASSERT_ERROR( val.get_int32(), INCORRECT_TYPE );
       ASSERT_ERROR( val.get_object(), INCORRECT_TYPE );
+      ASSERT_ERROR( val.get_int32(), INCORRECT_TYPE );
+      ASSERT_ERROR( val.get_uint32(), INCORRECT_TYPE );
       ASSERT_ERROR( val.get_int64(), INCORRECT_TYPE );
       ASSERT_ERROR( val.get_uint64(), INCORRECT_TYPE );
       ASSERT_ERROR( val.get_double(), INCORRECT_TYPE );
@@ -353,36 +508,64 @@ namespace error_tests {
     }));
     TEST_SUCCEED();
   }
-
+#if SIMDJSON_EXCEPTIONS
   bool invalid_type() {
     TEST_START();
-    ONDEMAND_SUBTEST("]", "]", doc.type().error() == TAPE_ERROR);
-    ONDEMAND_SUBTEST("}", "}", doc.type().error() == TAPE_ERROR);
-    ONDEMAND_SUBTEST(":", ":", doc.type().error() == TAPE_ERROR);
-    ONDEMAND_SUBTEST(",", ",", doc.type().error() == TAPE_ERROR);
-    ONDEMAND_SUBTEST("+", "+", doc.type().error() == TAPE_ERROR);
+    ONDEMAND_SUBTEST("]", "]", doc.type() == ondemand::json_type::unknown);
+    ONDEMAND_SUBTEST("}", "}", doc.type() == ondemand::json_type::unknown);
+    ONDEMAND_SUBTEST(":", ":", doc.type() == ondemand::json_type::unknown);
+    ONDEMAND_SUBTEST(",", ",", doc.type() == ondemand::json_type::unknown);
+    ONDEMAND_SUBTEST("+", "+", doc.type() == ondemand::json_type::unknown);
     TEST_SUCCEED();
   }
+#endif // SIMDJSON_EXCEPTIONS
+
+#if SIMDJSON_EXCEPTIONS
+  bool operator_tests() {
+    TEST_START();
+    ondemand::parser parser;
+
+    // Test successful case
+    auto json = R"({ "key": "value", "number": 42 })"_padded;
+    parser.iterate(json).value(); // Test operator*
+    *parser.iterate(json); // Test operator*
+    auto doc_result = parser.iterate(json);
+    ASSERT_SUCCESS(doc_result.error());
+
+    ASSERT_TRUE(doc_result.has_value());
+    double x = doc_result->find_field("number").get<double>();
+    ASSERT_EQUAL(x, 42.0);
+    TEST_SUCCEED();
+  }
+#endif // SIMDJSON_EXCEPTIONS
 
   bool run() {
     return
+           issue2120() &&
            badbadjson() &&
            badbadjson2() &&
            issue1834() &&
            issue1834_2() &&
+           skip_child_incomplete_container() &&
 #if SIMDJSON_EXCEPTIONS
+           document_in_class() &&
+           direct_document() &&
            raw_json_string_except() &&
            raw_json_string_except_with_io() &&
 #endif
            raw_json_string_error() &&
            empty_document_error() &&
            parser_max_capacity() &&
+           parser_set_max_capacity() &&
+           failed_allocate_then_iterate() &&
            get_fail_then_succeed_bool() &&
            get_fail_then_succeed_null() &&
-           invalid_type() &&
            simple_error_example() &&
+           unclosed_string_keeps_earlier_errors() &&
 #if SIMDJSON_EXCEPTIONS
+           invalid_type() &&
            simple_error_example_except() &&
+           operator_tests() &&
 #endif
            true;
   }

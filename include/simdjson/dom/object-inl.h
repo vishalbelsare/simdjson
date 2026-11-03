@@ -1,11 +1,15 @@
-#ifndef SIMDJSON_INLINE_OBJECT_H
-#define SIMDJSON_INLINE_OBJECT_H
+#ifndef SIMDJSON_OBJECT_INL_H
+#define SIMDJSON_OBJECT_INL_H
 
-#include "simdjson/dom/element.h"
+#include "simdjson/dom/base.h"
 #include "simdjson/dom/object.h"
-#include "simdjson/portability.h"
+#include "simdjson/dom/document.h"
+
+#include "simdjson/dom/element-inl.h"
+#include "simdjson/error-inl.h"
+#include "simdjson/jsonpathutil.h"
+
 #include <cstring>
-#include <string>
 
 namespace simdjson {
 
@@ -31,9 +35,25 @@ inline simdjson_result<dom::element> simdjson_result<dom::object>::at_pointer(st
   if (error()) { return error(); }
   return first.at_pointer(json_pointer);
 }
+inline simdjson_result<dom::element> simdjson_result<dom::object>::at_path(std::string_view json_path) const noexcept {
+  if (error()) { return error(); }
+  auto json_pointer = json_path_to_pointer_conversion(json_path);
+  if (json_pointer == "-1") { return INVALID_JSON_POINTER; }
+  return at_pointer(json_pointer);
+}
+inline simdjson_result<std::vector<dom::element>> simdjson_result<dom::object>::at_path_with_wildcard(std::string_view json_path) const noexcept {
+  if (error()) {
+    return error();
+  }
+  return first.at_path_with_wildcard(json_path);
+}
 inline simdjson_result<dom::element> simdjson_result<dom::object>::at_key(std::string_view key) const noexcept {
   if (error()) { return error(); }
   return first.at_key(key);
+}
+inline std::vector<dom::element>& simdjson_result<dom::object>::get_values(std::vector<dom::element>& out) const noexcept {
+  if (error()) { return out; }
+  return first.get_values(out);
 }
 inline simdjson_result<dom::element> simdjson_result<dom::object>::at_key_case_insensitive(std::string_view key) const noexcept {
   if (error()) { return error(); }
@@ -128,6 +148,36 @@ inline simdjson_result<element> object::at_pointer(std::string_view json_pointer
   return child;
 }
 
+inline simdjson_result<element> object::at_path(std::string_view json_path) const noexcept {
+  auto json_pointer = json_path_to_pointer_conversion(json_path);
+  if (json_pointer == "-1") { return INVALID_JSON_POINTER; }
+  return at_pointer(json_pointer);
+}
+
+inline void object::process_json_path_of_child_elements(std::vector<element>::iterator& current, std::vector<element>::iterator& end, const std::string_view& path_suffix, std::vector<element>& accumulator) const noexcept {
+  if (current == end) {
+    return;
+  }
+
+  simdjson_result<std::vector<element>> result;
+
+  for (auto it = current; it != end; ++it) {
+    std::vector<element> child_result;
+    auto error = it->at_path_with_wildcard(path_suffix).get(child_result);
+    if(error) {
+      continue;
+    }
+    accumulator.insert(accumulator.end(),
+                        std::make_move_iterator(child_result.begin()),
+                        std::make_move_iterator(child_result.end()));
+  }
+}
+
+inline simdjson_result<std::vector<element>> object::at_path_with_wildcard(std::string_view json_path) const noexcept {
+  SIMDJSON_DEVELOPMENT_ASSERT(tape.usable()); // https://github.com/simdjson/simdjson/issues/1914
+  return element(*this).at_path_with_wildcard(json_path);
+}
+
 inline simdjson_result<element> object::at_key(std::string_view key) const noexcept {
   iterator end_field = end();
   for (iterator field = begin(); field != end_field; ++field) {
@@ -136,6 +186,18 @@ inline simdjson_result<element> object::at_key(std::string_view key) const noexc
     }
   }
   return NO_SUCH_FIELD;
+}
+
+inline std::vector<element>& object::get_values(std::vector<element>& out) const noexcept {
+  iterator end_field = end();
+  iterator begin_field = begin();
+
+  out.reserve(std::distance(begin_field, end_field));
+  for (iterator field = begin_field; field != end_field; ++field) {
+    out.emplace_back(field.value());
+  }
+
+  return out;
 }
 // In case you wonder why we need this, please see
 // https://github.com/simdjson/simdjson/issues/323
@@ -148,6 +210,10 @@ inline simdjson_result<element> object::at_key_case_insensitive(std::string_view
     }
   }
   return NO_SUCH_FIELD;
+}
+
+inline object::operator element() const noexcept {
+	return element(tape);
 }
 
 //
@@ -230,7 +296,16 @@ inline bool object::iterator::key_equals_case_insensitive(std::string_view o) co
       // See For case-insensitive string comparisons, avoid char-by-char functions
       // https://lemire.me/blog/2020/04/30/for-case-insensitive-string-comparisons-avoid-char-by-char-functions/
       // Note that it might be worth rolling our own strncasecmp function, with vectorization.
-      return (simdjson_strncasecmp(o.data(), key_c_str(), len) == 0);
+      //
+      // strncasecmp stops at a null character, and a JSON key may contain some:
+      // when it does, we resume the comparison right after the null character.
+      const char *key = key_c_str();
+      size_t i = 0;
+      while (simdjson_strncasecmp(o.data() + i, key + i, len - i) == 0) {
+        const void *null_char = std::memchr(key + i, '\0', len - i);
+        if (null_char == nullptr) { return true; }
+        i = size_t(static_cast<const char *>(null_char) - key) + 1;
+      }
   }
   return false;
 }
@@ -244,13 +319,13 @@ inline key_value_pair::key_value_pair(std::string_view _key, element _value) noe
 
 } // namespace simdjson
 
-#if defined(__cpp_lib_ranges)
+#if SIMDJSON_SUPPORTS_RANGES
 static_assert(std::ranges::view<simdjson::dom::object>);
 static_assert(std::ranges::sized_range<simdjson::dom::object>);
 #if SIMDJSON_EXCEPTIONS
 static_assert(std::ranges::view<simdjson::simdjson_result<simdjson::dom::object>>);
 static_assert(std::ranges::sized_range<simdjson::simdjson_result<simdjson::dom::object>>);
 #endif // SIMDJSON_EXCEPTIONS
-#endif // defined(__cpp_lib_ranges)
+#endif // SIMDJSON_SUPPORTS_RANGES
 
-#endif // SIMDJSON_INLINE_OBJECT_H
+#endif // SIMDJSON_OBJECT_INL_H

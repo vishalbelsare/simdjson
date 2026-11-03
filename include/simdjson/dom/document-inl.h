@@ -1,13 +1,14 @@
-#ifndef SIMDJSON_INLINE_DOCUMENT_H
-#define SIMDJSON_INLINE_DOCUMENT_H
+#ifndef SIMDJSON_DOCUMENT_INL_H
+#define SIMDJSON_DOCUMENT_INL_H
 
 // Inline implementations go in here.
 
+#include "simdjson/dom/base.h"
 #include "simdjson/dom/document.h"
-#include "simdjson/dom/element.h"
-#include "simdjson/internal/tape_ref.h"
+#include "simdjson/dom/element-inl.h"
+#include "simdjson/internal/tape_ref-inl.h"
 #include "simdjson/internal/jsonformatutils.h"
-#include <ostream>
+
 #include <cstring>
 
 namespace simdjson {
@@ -32,16 +33,25 @@ inline error_code document::allocate(size_t capacity) noexcept {
     allocated_capacity = 0;
     return SUCCESS;
   }
+  if (capacity > SIMDJSON_MAXSIZE_BYTES) {
+    return CAPACITY;
+  }
 
   // a pathological input like "[[[[..." would generate capacity tape elements, so
   // need a capacity of at least capacity + 1, but it is also possible to do
   // worse with "[7,7,7,7,6,7,7,7,6,7,7,6,[7,7,7,7,6,7,7,7,6,7,7,6,7,7,7,7,7,7,6"
   //where capacity + 1 tape elements are
   // generated, see issue https://github.com/simdjson/simdjson/issues/345
+  if(capacity + 3 < capacity) {
+    return CAPACITY; // overflow, only happen on legacy 32-bit systems with very large capacity
+  }
   size_t tape_capacity = SIMDJSON_ROUNDUP_N(capacity + 3, 64);
   // a document with only zero-length strings... could have capacity/3 string
   // and we would need capacity/3 * 5 bytes on the string buffer
-  size_t string_capacity = SIMDJSON_ROUNDUP_N(5 * capacity / 3 + SIMDJSON_PADDING, 64);
+  if(5 * (capacity / 3) + SIMDJSON_PADDING < SIMDJSON_PADDING) {
+    return CAPACITY; // overflow, only happen on legacy 32-bit systems with very large capacity
+  }
+  size_t string_capacity = SIMDJSON_ROUNDUP_N(5 * (capacity / 3) + SIMDJSON_PADDING, 64);
   string_buf.reset( new (std::nothrow) uint8_t[string_capacity]);
   tape.reset(new (std::nothrow) uint64_t[tape_capacity]);
   if(!(string_buf && tape)) {
@@ -140,6 +150,15 @@ inline bool document::dump_raw_tape(std::ostream &os) const noexcept {
     case 'r': // we start and end with the root node
       // should we be hitting the root node?
       return false;
+    case 'Z': // we have a big integer
+      os << "bigint ";
+      std::memcpy(&string_length, string_buf.get() + payload, sizeof(uint32_t));
+      os << std::string_view(
+        reinterpret_cast<const char *>(string_buf.get() + payload + sizeof(uint32_t)),
+        string_length
+      );
+      os << '\n';
+      break;
     default:
       return false;
     }
@@ -155,4 +174,4 @@ inline bool document::dump_raw_tape(std::ostream &os) const noexcept {
 } // namespace dom
 } // namespace simdjson
 
-#endif // SIMDJSON_INLINE_DOCUMENT_H
+#endif // SIMDJSON_DOCUMENT_INL_H

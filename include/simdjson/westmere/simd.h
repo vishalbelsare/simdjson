@@ -1,10 +1,14 @@
 #ifndef SIMDJSON_WESTMERE_SIMD_H
 #define SIMDJSON_WESTMERE_SIMD_H
 
+#ifndef SIMDJSON_CONDITIONAL_INCLUDE
+#include "simdjson/westmere/base.h"
+#include "simdjson/westmere/bitmanipulation.h"
 #include "simdjson/internal/simdprune_tables.h"
+#endif // SIMDJSON_CONDITIONAL_INCLUDE
 
 namespace simdjson {
-namespace SIMDJSON_IMPLEMENTATION {
+namespace westmere {
 namespace {
 namespace simd {
 
@@ -32,10 +36,6 @@ namespace simd {
     simdjson_inline Child& operator^=(const Child other) { auto this_cast = static_cast<Child*>(this); *this_cast = *this_cast ^ other; return *this_cast; }
   };
 
-  // Forward-declared so they can be used by splat and friends.
-  template<typename T>
-  struct simd8;
-
   template<typename T, typename Mask=simd8<bool>>
   struct base8: base<simd8<T>> {
     typedef uint16_t bitmask_t;
@@ -59,10 +59,10 @@ namespace simd {
   struct simd8<bool>: base8<bool> {
     static simdjson_inline simd8<bool> splat(bool _value) { return _mm_set1_epi8(uint8_t(-(!!_value))); }
 
-    simdjson_inline simd8<bool>() : base8() {}
-    simdjson_inline simd8<bool>(const __m128i _value) : base8<bool>(_value) {}
+    simdjson_inline simd8() : base8() {}
+    simdjson_inline simd8(const __m128i _value) : base8<bool>(_value) {}
     // Splat constructor
-    simdjson_inline simd8<bool>(bool _value) : base8<bool>(splat(_value)) {}
+    simdjson_inline simd8(bool _value) : base8<bool>(splat(_value)) {}
 
     simdjson_inline int to_bitmask() const { return _mm_movemask_epi8(*this); }
     simdjson_inline bool any() const { return !_mm_testz_si128(*this, *this); }
@@ -238,7 +238,7 @@ namespace simd {
     simdjson_inline simd8<bool> operator<=(const simd8<uint8_t> other) const { return other.max_val(*this) == other; }
     simdjson_inline simd8<bool> operator>=(const simd8<uint8_t> other) const { return other.min_val(*this) == other; }
     simdjson_inline simd8<bool> operator>(const simd8<uint8_t> other) const { return this->gt_bits(other).any_bits_set(); }
-    simdjson_inline simd8<bool> operator<(const simd8<uint8_t> other) const { return this->gt_bits(other).any_bits_set(); }
+    simdjson_inline simd8<bool> operator<(const simd8<uint8_t> other) const { return this->lt_bits(other).any_bits_set(); }
 
     // Bit-specific operations
     simdjson_inline simd8<bool> bits_not_set() const { return *this == uint8_t(0); }
@@ -265,6 +265,7 @@ namespace simd {
     static constexpr int NUM_CHUNKS = 64 / sizeof(simd8<T>);
     static_assert(NUM_CHUNKS == 4, "Westmere kernel should use four registers per 64-byte block.");
     const simd8<T> chunks[NUM_CHUNKS];
+    template<int idx> simd8<uint8_t> get() const { return idx < NUM_CHUNKS ? chunks[idx] : simd8<T>(); }
 
     simd8x64(const simd8x64<T>& o) = delete; // no copy allowed
     simd8x64<T>& operator=(const simd8<T>& other) = delete; // no assignment allowed
@@ -332,7 +333,7 @@ namespace simd {
 
 } // namespace simd
 } // unnamed namespace
-} // namespace SIMDJSON_IMPLEMENTATION
+} // namespace westmere
 } // namespace simdjson
 
 #endif // SIMDJSON_WESTMERE_SIMD_INPUT_H

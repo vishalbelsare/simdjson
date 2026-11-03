@@ -1,3 +1,13 @@
+#ifndef SIMDJSON_GENERIC_ONDEMAND_ARRAY_ITERATOR_INL_H
+
+#ifndef SIMDJSON_CONDITIONAL_INCLUDE
+#define SIMDJSON_GENERIC_ONDEMAND_ARRAY_ITERATOR_INL_H
+#include "simdjson/generic/ondemand/base.h"
+#include "simdjson/generic/ondemand/array_iterator.h"
+#include "simdjson/generic/ondemand/value-inl.h"
+#include "simdjson/generic/ondemand/value_iterator-inl.h"
+#endif // SIMDJSON_CONDITIONAL_INCLUDE
+
 namespace simdjson {
 namespace SIMDJSON_IMPLEMENTATION {
 namespace ondemand {
@@ -6,7 +16,64 @@ simdjson_inline array_iterator::array_iterator(const value_iterator &_iter) noex
   : iter{_iter}
 {}
 
+#if SIMDJSON_DEVELOPMENT_CHECKS
+simdjson_inline array_iterator::array_iterator(const value_iterator &_iter, array* _parent) noexcept
+  : parent{_parent}, iter{_iter}
+{
+  if (parent) parent->set_locked(true);
+}
+
+simdjson_inline array_iterator::~array_iterator() noexcept
+{
+  if (parent) parent->set_locked(false);
+}
+
+simdjson_inline array_iterator::array_iterator(array_iterator&& other) noexcept
+  : has_been_referenced{other.has_been_referenced},
+    parent{other.parent},
+    iter{std::move(other.iter)}
+{
+  other.parent = nullptr;
+}
+
+simdjson_inline array_iterator& array_iterator::operator=(array_iterator&& other) noexcept {
+  if (this != &other)
+  {
+    if (parent)
+      parent->set_locked(false);
+    has_been_referenced = other.has_been_referenced;
+    parent = other.parent;
+    iter = std::move(other.iter);
+
+    other.parent = nullptr;
+  }
+  return *this;
+}
+
+simdjson_inline array_iterator::array_iterator(const array_iterator& other) noexcept
+  : has_been_referenced{other.has_been_referenced},
+    parent{nullptr},
+    iter{other.iter}
+{}
+
+simdjson_inline array_iterator& array_iterator::operator=(const array_iterator& other) noexcept {
+  if (this != &other)
+  {
+    if (parent)
+      parent->set_locked(false);
+    has_been_referenced = other.has_been_referenced;
+    parent = nullptr;
+    iter = other.iter;
+  }
+  return *this;
+}
+#endif
+
 simdjson_inline simdjson_result<value> array_iterator::operator*() noexcept {
+#if SIMDJSON_DEVELOPMENT_CHECKS
+   SIMDJSON_ASSUME(!has_been_referenced);
+   has_been_referenced = true;
+#endif
   if (iter.error()) { iter.abandon(); return iter.error(); }
   return value(iter.child());
 }
@@ -17,6 +84,9 @@ simdjson_inline bool array_iterator::operator!=(const array_iterator &) const no
   return iter.is_open();
 }
 simdjson_inline array_iterator &array_iterator::operator++() noexcept {
+#if SIMDJSON_DEVELOPMENT_CHECKS
+   has_been_referenced = false;
+#endif
   error_code error;
   // PERF NOTE this is a safety rail ... users should exit loops as soon as they receive an error, so we'll never get here.
   // However, it does not seem to make a perf difference, so we add it out of an abundance of caution.
@@ -26,6 +96,9 @@ simdjson_inline array_iterator &array_iterator::operator++() noexcept {
   return *this;
 }
 
+simdjson_inline bool array_iterator::at_end() const noexcept {
+  return iter.at_end();
+}
 } // namespace ondemand
 } // namespace SIMDJSON_IMPLEMENTATION
 } // namespace simdjson
@@ -62,5 +135,9 @@ simdjson_inline simdjson_result<SIMDJSON_IMPLEMENTATION::ondemand::array_iterato
   ++(first);
   return *this;
 }
-
+simdjson_inline bool simdjson_result<SIMDJSON_IMPLEMENTATION::ondemand::array_iterator>::at_end() const noexcept {
+  return !first.iter.is_valid() || first.at_end();
+}
 } // namespace simdjson
+
+#endif // SIMDJSON_GENERIC_ONDEMAND_ARRAY_ITERATOR_INL_H

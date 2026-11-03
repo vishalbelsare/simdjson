@@ -1,20 +1,14 @@
 #ifndef SIMDJSON_DOM_OBJECT_H
 #define SIMDJSON_DOM_OBJECT_H
 
-#include "simdjson/common_defs.h"
-#include "simdjson/error.h"
+#include <vector>
+
+#include "simdjson/dom/base.h"
+#include "simdjson/dom/element.h"
 #include "simdjson/internal/tape_ref.h"
 
 namespace simdjson {
-namespace internal {
-template<typename T>
-class string_builder;
-}
 namespace dom {
-
-class document;
-class element;
-class key_value_pair;
 
 /**
  * JSON object.
@@ -26,13 +20,16 @@ public:
 
   class iterator {
   public:
-    using value_type = key_value_pair;
+    using value_type = const key_value_pair;
     using difference_type = std::ptrdiff_t;
+    using pointer = void;
+    using reference = value_type;
+    using iterator_category = std::forward_iterator_tag;
 
     /**
      * Get the actual key/value pair
      */
-    inline const value_type operator*() const noexcept;
+    inline reference operator*() const noexcept;
     /**
      * Get the next key/value pair.
      *
@@ -94,7 +91,7 @@ public:
   private:
     simdjson_inline iterator(const internal::tape_ref &tape) noexcept;
 
-    internal::tape_ref tape;
+    internal::tape_ref tape{};
 
     friend class object;
   };
@@ -150,6 +147,7 @@ public:
    *         - INCORRECT_TYPE if this is not an object
    */
   inline simdjson_result<element> operator[](const char *key) const noexcept;
+  simdjson_result<element> operator[](int) const noexcept = delete;
 
   /**
    * Get the value associated with the given JSON pointer. We use the RFC 6901
@@ -177,6 +175,31 @@ public:
   inline simdjson_result<element> at_pointer(std::string_view json_pointer) const noexcept;
 
   /**
+   * Recursive function which processes the JSON path of each child element
+   */
+  inline void process_json_path_of_child_elements(std::vector<element>::iterator& current, std::vector<element>::iterator& end, const std::string_view& path_suffix, std::vector<element>& accumulator) const noexcept;
+
+  /**
+   * Adds support for JSONPath expression with wildcards '*'
+   */
+  inline simdjson_result<std::vector<element>> at_path_with_wildcard(std::string_view json_path) const noexcept;
+
+  /**
+   * Get the value associated with the given JSONPath expression. We only support
+   * JSONPath queries that trivially convertible to JSON Pointer queries: key
+   * names and array indices.
+   *
+   * https://www.rfc-editor.org/rfc/rfc9535 (RFC 9535)
+   *
+   * @return The value associated with the given JSONPath expression, or:
+   *         - INVALID_JSON_POINTER if the JSONPath to JSON Pointer conversion fails
+   *         - NO_SUCH_FIELD if a field does not exist in an object
+   *         - INDEX_OUT_OF_BOUNDS if an array index is larger than an array length
+   *         - INCORRECT_TYPE if a non-integer is used to access an array
+  */
+  inline simdjson_result<element> at_path(std::string_view json_path) const noexcept;
+
+  /**
    * Get the value associated with the given key.
    *
    * The key will be matched against **unescaped** JSON:
@@ -193,6 +216,14 @@ public:
   inline simdjson_result<element> at_key(std::string_view key) const noexcept;
 
   /**
+   * Gets the values associated with keys of an object
+   * This function has linear-time complexity: the keys are checked one by one.
+   *
+   * @return the values associated with each key of an object
+   */
+  inline std::vector<element>& get_values(std::vector<element>& out) const noexcept;
+
+  /**
    * Get the value associated with the given key in a case-insensitive manner.
    * It is only guaranteed to work over ASCII inputs.
    *
@@ -205,10 +236,15 @@ public:
    */
   inline simdjson_result<element> at_key_case_insensitive(std::string_view key) const noexcept;
 
+  /**
+   * Implicitly convert object to element
+   */
+  inline operator element() const noexcept;
+
 private:
   simdjson_inline object(const internal::tape_ref &tape) noexcept;
 
-  internal::tape_ref tape;
+  internal::tape_ref tape{};
 
   friend class element;
   friend struct simdjson_result<element>;
@@ -243,8 +279,12 @@ public:
 
   inline simdjson_result<dom::element> operator[](std::string_view key) const noexcept;
   inline simdjson_result<dom::element> operator[](const char *key) const noexcept;
+  simdjson_result<dom::element> operator[](int) const noexcept = delete;
   inline simdjson_result<dom::element> at_pointer(std::string_view json_pointer) const noexcept;
+  inline simdjson_result<std::vector<dom::element>> at_path_with_wildcard(std::string_view json_path_new) const noexcept;
+  inline simdjson_result<dom::element> at_path(std::string_view json_path) const noexcept;
   inline simdjson_result<dom::element> at_key(std::string_view key) const noexcept;
+  inline std::vector<dom::element>& get_values(std::vector<dom::element>& out) const noexcept;
   inline simdjson_result<dom::element> at_key_case_insensitive(std::string_view key) const noexcept;
 
 #if SIMDJSON_EXCEPTIONS
@@ -256,9 +296,7 @@ public:
 
 } // namespace simdjson
 
-#if defined(__cpp_lib_ranges)
-#include <ranges>
-
+#if SIMDJSON_SUPPORTS_RANGES
 namespace std {
 namespace ranges {
 template<>
@@ -269,6 +307,6 @@ inline constexpr bool enable_view<simdjson::simdjson_result<simdjson::dom::objec
 #endif // SIMDJSON_EXCEPTIONS
 } // namespace ranges
 } // namespace std
-#endif // defined(__cpp_lib_ranges)
+#endif // SIMDJSON_SUPPORTS_RANGES
 
 #endif // SIMDJSON_DOM_OBJECT_H

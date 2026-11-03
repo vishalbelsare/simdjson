@@ -1,13 +1,16 @@
 #ifndef SIMDJSON_PPC64_SIMD_H
 #define SIMDJSON_PPC64_SIMD_H
 
-#include "simdjson/base.h"
-#include "simdjson/internal/simdprune_tables.h"
+#ifndef SIMDJSON_CONDITIONAL_INCLUDE
+#include "simdjson/ppc64/base.h"
 #include "simdjson/ppc64/bitmanipulation.h"
+#include "simdjson/internal/simdprune_tables.h"
+#endif // SIMDJSON_CONDITIONAL_INCLUDE
+
 #include <type_traits>
 
 namespace simdjson {
-namespace SIMDJSON_IMPLEMENTATION {
+namespace ppc64 {
 namespace {
 namespace simd {
 
@@ -58,9 +61,6 @@ template <typename Child> struct base {
   }
 };
 
-// Forward-declared so they can be used by splat and friends.
-template <typename T> struct simd8;
-
 template <typename T, typename Mask = simd8<bool>>
 struct base8 : base<simd8<T>> {
   typedef uint16_t bitmask_t;
@@ -96,11 +96,11 @@ template <> struct simd8<bool> : base8<bool> {
     return (__m128i)vec_splats((unsigned char)(-(!!_value)));
   }
 
-  simdjson_inline simd8<bool>() : base8() {}
-  simdjson_inline simd8<bool>(const __m128i _value)
+  simdjson_inline simd8() : base8<bool>() {}
+  simdjson_inline simd8(const __m128i _value)
       : base8<bool>(_value) {}
   // Splat constructor
-  simdjson_inline simd8<bool>(bool _value)
+  simdjson_inline simd8(bool _value)
       : base8<bool>(splat(_value)) {}
 
   simdjson_inline int to_bitmask() const {
@@ -353,7 +353,7 @@ template <> struct simd8<uint8_t> : base8_numeric<uint8_t> {
   }
   simdjson_inline simd8<bool>
   operator<(const simd8<uint8_t> other) const {
-    return this->gt_bits(other).any_bits_set();
+    return this->lt_bits(other).any_bits_set();
   }
 
   // Bit-specific operations
@@ -397,6 +397,7 @@ template <typename T> struct simd8x64 {
   static_assert(NUM_CHUNKS == 4,
                 "PPC64 kernel should use four registers per 64-byte block.");
   const simd8<T> chunks[NUM_CHUNKS];
+  template<int idx> simd8<uint8_t> get() const { return idx < NUM_CHUNKS ? chunks[idx] : simd8<T>(); }
 
   simd8x64(const simd8x64<T> &o) = delete; // no copy allowed
   simd8x64<T> &
@@ -466,7 +467,7 @@ template <typename T> struct simd8x64 {
 
 } // namespace simd
 } // unnamed namespace
-} // namespace SIMDJSON_IMPLEMENTATION
+} // namespace ppc64
 } // namespace simdjson
 
 #endif // SIMDJSON_PPC64_SIMD_INPUT_H

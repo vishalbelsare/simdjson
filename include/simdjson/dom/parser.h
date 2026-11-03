@@ -1,40 +1,12 @@
 #ifndef SIMDJSON_DOM_PARSER_H
 #define SIMDJSON_DOM_PARSER_H
 
-#include "simdjson/common_defs.h"
+#include "simdjson/dom/base.h"
 #include "simdjson/dom/document.h"
-#include "simdjson/error.h"
-#include "simdjson/internal/dom_parser_implementation.h"
-#include "simdjson/internal/tape_ref.h"
-#include "simdjson/padded_string.h"
-#include "simdjson/portability.h"
-#include <memory>
-#include <ostream>
-#include <string>
 
 namespace simdjson {
 
 namespace dom {
-
-class document_stream;
-class element;
-
-/** The default batch size for parser.parse_many() and parser.load_many() */
-static constexpr size_t DEFAULT_BATCH_SIZE = 1000000;
-/**
- * Some adversary might try to set the batch size to 0 or 1, which might cause problems.
- * We set a minimum of 32B since anything else is highly likely to be an error. In practice,
- * most users will want a much larger batch size.
- *
- * All non-negative MINIMAL_BATCH_SIZE values should be 'safe' except that, obviously, no JSON
- * document can ever span 0 or 1 byte and that very large values would create memory allocation issues.
- */
-static constexpr size_t MINIMAL_BATCH_SIZE = 32;
-
-/**
- * It is wasteful to allocate memory for tiny documents (e.g., 4 bytes).
- */
-static constexpr size_t MINIMAL_DOCUMENT_CAPACITY = 32;
 
 /**
  * A persistent document parser.
@@ -111,6 +83,15 @@ public:
    * If the parser's current capacity is less than the file length, it will allocate enough capacity
    * to handle it (up to max_capacity).
    *
+   * ## Windows and Unicode
+   *
+   * Windows users who need to read files with non-ANSI characters in the
+   * name should set their code page to UTF-8 (65001) before calling this
+   * function. This should be the default with Windows 11 and better.
+   * Further, they may use the AreFileApisANSI function to determine whether
+   * the filename is interpreted using the ANSI or the system default OEM
+   * codepage, and they may call SetFileApisToOEM accordingly.
+   *
    * @param path The path to load.
    * @return The document, or an error:
    *         - IO_ERROR if there was an error opening or reading the file.
@@ -121,8 +102,55 @@ public:
    *         - other json errors if parsing fails. You should not rely on these errors to always the same for the
    *           same document: they may vary under runtime dispatch (so they may vary depending on your system and hardware).
    */
-  inline simdjson_result<element> load(const std::string &path) & noexcept;
-  inline simdjson_result<element> load(const std::string &path) &&  = delete ;
+  inline simdjson_result<element> load(std::string_view path) & noexcept;
+  inline simdjson_result<element> load(std::string_view path) &&  = delete ;
+
+  /**
+   * Load a JSON document from a file into a provide document instance and return a temporary reference to it.
+   * It is similar to the function `load` except that instead of parsing into the internal
+   * `document` instance associated with the parser, it allows the user to provide a document
+   * instance.
+   *
+   *   dom::parser parser;
+   *   dom::document doc;
+   *   element doc_root = parser.load_into_document(doc, "jsonexamples/twitter.json");
+   *
+   * The function is eager: the file's content is loaded in memory inside the parser instance
+   * and immediately parsed. The file can be deleted after the `parser.load_into_document` call.
+   *
+   * ### IMPORTANT: Document Lifetime
+   *
+   * After the call to load_into_document, the parser is no longer needed.
+   *
+   * The JSON document lives in the document instance: you must keep the document
+   * instance alive while you navigate through it (i.e., used the returned value from
+   * load_into_document). You are encourage to reuse the document instance
+   * many times with new data to avoid reallocations:
+   *
+   *   dom::document doc;
+   *   element doc_root1 = parser.load_into_document(doc, "jsonexamples/twitter.json");
+   *   //... doc_root1 is a pointer inside doc
+   *   element doc_root2 = parser.load_into_document(doc, "jsonexamples/twitter.json");
+   *   //... doc_root2 is a pointer inside doc
+   *   // at this point doc_root1 is no longer safe
+   *
+   * Moving the document instance is safe, but it invalidates the element instances. After
+   * moving a document, you can recover safe access to the document root with its `root()` method.
+   *
+   * @param doc The document instance where the parsed data will be stored (on success).
+   * @param path The path to load.
+   * @return The document, or an error:
+   *         - IO_ERROR if there was an error opening or reading the file.
+   *           Be mindful that on some 32-bit systems,
+   *           the file size might be limited to 2 GB.
+   *         - MEMALLOC if the parser does not have enough capacity and memory allocation fails.
+   *         - CAPACITY if the parser does not have enough capacity and len > max_capacity.
+   *         - other json errors if parsing fails. You should not rely on these errors to always the same for the
+   *           same document: they may vary under runtime dispatch (so they may vary depending on your system and hardware).
+   */
+  inline simdjson_result<element> load_into_document(document& doc, std::string_view path) & noexcept;
+  inline simdjson_result<element> load_into_document(document& doc, std::string_view path) && =delete;
+
   /**
    * Parse a JSON document and return a temporary reference to it.
    *
@@ -174,6 +202,19 @@ public:
    *   simdjson::dom::parser parser;
    *   simdjson::dom::element element = parser.parse(padded_json_copy.get(), json_len, false);
    *
+   * ### std::string references
+   *
+   * Whenever you pass an std::string reference, the parser may access the bytes beyond the end of
+   * the string but before the end of the allocated memory (std::string::capacity()).
+   * If you are using a sanitizer that checks for reading uninitialized bytes or std::string's
+   * container-overflow checks, you may encounter sanitizer warnings.
+   * You can safely ignore these warnings. Or you can call simdjson::pad(std::string&) to pad the
+   * string with SIMDJSON_PADDING spaces: this function returns a simdjson::padding_string_view
+   * which can be be passed to the parser's parse function:
+   *
+   *    std::string json = R"({ "foo": 1 } { "foo": 2 } { "foo": 3 } )";
+   *    element doc = parser.parse(simdjson::pad(json));
+   *
    * ### Parser Capacity
    *
    * If the parser's current capacity is less than len, it will allocate enough capacity
@@ -195,7 +236,7 @@ public:
   /** @overload parse(const uint8_t *buf, size_t len, bool realloc_if_needed) */
   simdjson_inline simdjson_result<element> parse(const char *buf, size_t len, bool realloc_if_needed = true) & noexcept;
   simdjson_inline simdjson_result<element> parse(const char *buf, size_t len, bool realloc_if_needed = true) && =delete;
-  /** @overload parse(const uint8_t *buf, size_t len, bool realloc_if_needed) */
+  /** @overload parse(const std::string &) */
   simdjson_inline simdjson_result<element> parse(const std::string &s) & noexcept;
   simdjson_inline simdjson_result<element> parse(const std::string &s) && =delete;
   /** @overload parse(const uint8_t *buf, size_t len, bool realloc_if_needed) */
@@ -207,6 +248,64 @@ public:
 
   /** @private We do not want to allow implicit conversion from C string to std::string. */
   simdjson_inline simdjson_result<element> parse(const char *buf) noexcept = delete;
+
+  /**
+   * Parse a JSON document whose buffer is **not** padded, in place and without
+   * copying it.
+   *
+   * *This feature is currently experimental.*
+   *
+   * The standard parse() methods require the input buffer to have at least
+   * SIMDJSON_PADDING extra readable bytes after the document (or they copy it
+   * into a padded buffer when realloc_if_needed is true). parse_unpadded() lifts
+   * that requirement: it parses directly from your buffer of exactly `len` bytes,
+   * never reading past `buf + len`, and never allocating a full padded copy.
+   *
+   *   dom::parser parser;
+   *   std::string_view json = get_json(); // no trailing padding needed
+   *   dom::element doc = parser.parse_unpadded(json);
+   *
+   * This is the convenient way to use simdjson when you cannot (or do not want
+   * to) pad your input, e.g. a std::string_view into a larger buffer or a memory
+   * mapped file whose tail you do not control. It is generally a little slower
+   * than parsing a padded buffer with parse() (the very end of the document is
+   * handled with extra care), but it avoids the O(n) copy that
+   * parse(buf, len, true) performs when realloc_if_needed is true.
+   *
+   * The input is read but not modified, and it must remain valid (and the parser
+   * alive) for as long as you navigate the returned document, exactly like
+   * parse(buf, len, false).
+   *
+   * @param buf The JSON to parse. Only `len` bytes are read; no padding required.
+   * @param len The length of the JSON.
+   * @return An element pointing at the root of the document, or an error:
+   *         - MEMALLOC if the parser does not have enough capacity and allocation fails.
+   *         - CAPACITY if the parser does not have enough capacity and len > max_capacity.
+   *         - other json errors if parsing fails.
+   */
+  inline simdjson_result<element> parse_unpadded(const uint8_t *buf, size_t len) & noexcept;
+  inline simdjson_result<element> parse_unpadded(const uint8_t *buf, size_t len) && =delete;
+  /** @overload parse_unpadded(const uint8_t *buf, size_t len) */
+  simdjson_inline simdjson_result<element> parse_unpadded(const char *buf, size_t len) & noexcept;
+  simdjson_inline simdjson_result<element> parse_unpadded(const char *buf, size_t len) && =delete;
+  /** @overload parse_unpadded(const uint8_t *buf, size_t len) */
+  simdjson_inline simdjson_result<element> parse_unpadded(std::string_view s) & noexcept;
+  simdjson_inline simdjson_result<element> parse_unpadded(std::string_view s) && =delete;
+
+  /**
+   * Parse a non-padded JSON document into a caller-provided document instance, in
+   * place and without copying. This is to parse_unpadded() what
+   * parse_into_document() is to parse(). See parse_unpadded() for the padding and
+   * lifetime semantics.
+   *
+   * *This feature is currently experimental.*
+   *
+   * @param doc The document instance where the parsed data will be stored (on success).
+   * @param buf The JSON to parse. Only `len` bytes are read; no padding required.
+   * @param len The length of the JSON.
+   */
+  inline simdjson_result<element> parse_into_document_unpadded(document& doc, const uint8_t *buf, size_t len) & noexcept;
+  inline simdjson_result<element> parse_into_document_unpadded(document& doc, const uint8_t *buf, size_t len) && =delete;
 
   /**
    * Parse a JSON document into a provide document instance and return a temporary reference to it.
@@ -282,6 +381,8 @@ public:
    * And, possibly, no document many have been parsed when the `parser.load_many(path)` function
    * returned.
    *
+   * If there is a UTF-8 BOM, the parser skips it.
+   *
    * ### Format
    *
    * The file must contain a series of one or more JSON documents, concatenated into a single
@@ -294,7 +395,7 @@ public:
    * arrays or objects) MUST be separated with whitespace.
    *
    * The documents must not exceed batch_size bytes (by default 1MB) or they will fail to parse.
-   * Setting batch_size to excessively large or excesively small values may impact negatively the
+   * Setting batch_size to excessively large or excessively small values may impact negatively the
    * performance.
    *
    * ### Error Handling
@@ -340,7 +441,7 @@ public:
    *         - other json errors if parsing fails. You should not rely on these errors to always the same for the
    *           same document: they may vary under runtime dispatch (so they may vary depending on your system and hardware).
    */
-  inline simdjson_result<document_stream> load_many(const std::string &path, size_t batch_size = dom::DEFAULT_BATCH_SIZE) noexcept;
+  inline simdjson_result<document_stream> load_many(std::string_view path, size_t batch_size = dom::DEFAULT_BATCH_SIZE) noexcept;
 
   /**
    * Parse a buffer containing many JSON documents.
@@ -374,6 +475,8 @@ public:
    *     cout << std::string(doc["title"]) << endl;
    *   }
    *
+   * If there is a UTF-8 BOM, the parser skips it.
+   *
    * ### Format
    *
    * The buffer must contain a series of one or more JSON documents, concatenated into a single
@@ -386,7 +489,7 @@ public:
    * arrays or objects) MUST be separated with whitespace.
    *
    * The documents must not exceed batch_size bytes (by default 1MB) or they will fail to parse.
-   * Setting batch_size to excessively large or excesively small values may impact negatively the
+   * Setting batch_size to excessively large or excessively small values may impact negatively the
    * performance.
    *
    * ### Error Handling
@@ -429,7 +532,7 @@ public:
    * @param batch_size The batch size to use. MUST be larger than the largest document. The sweet
    *                   spot is cache-related: small enough to fit in cache, yet big enough to
    *                   parse as many documents as possible in one tight loop.
-   *                   Defaults to 10MB, which has been a reasonable sweet spot in our tests.
+   *                   Defaults to 1MB, which has been a reasonable sweet spot in our tests.
    * @return The stream, or an error. An empty input will yield 0 documents rather than an EMPTY error. Errors:
    *         - MEMALLOC if the parser does not have enough capacity and memory allocation fails
    *         - CAPACITY if the parser does not have enough capacity and batch_size > max_capacity.
@@ -439,15 +542,52 @@ public:
   inline simdjson_result<document_stream> parse_many(const uint8_t *buf, size_t len, size_t batch_size = dom::DEFAULT_BATCH_SIZE) noexcept;
   /** @overload parse_many(const uint8_t *buf, size_t len, size_t batch_size) */
   inline simdjson_result<document_stream> parse_many(const char *buf, size_t len, size_t batch_size = dom::DEFAULT_BATCH_SIZE) noexcept;
-  /** @overload parse_many(const uint8_t *buf, size_t len, size_t batch_size) */
+  /** @overload parse_many(const uint8_t *buf, size_t len, size_t batch_size)
+   * Returns INSUFFICIENT_PADDING if s lacks SIMDJSON_PADDING bytes of spare capacity (or trailing whitespace). */
   inline simdjson_result<document_stream> parse_many(const std::string &s, size_t batch_size = dom::DEFAULT_BATCH_SIZE) noexcept;
-  inline simdjson_result<document_stream> parse_many(const std::string &&s, size_t batch_size) = delete;// unsafe
+  inline simdjson_result<document_stream> parse_many(const std::string &&s, size_t batch_size = dom::DEFAULT_BATCH_SIZE) = delete;// unsafe
   /** @overload parse_many(const uint8_t *buf, size_t len, size_t batch_size) */
   inline simdjson_result<document_stream> parse_many(const padded_string &s, size_t batch_size = dom::DEFAULT_BATCH_SIZE) noexcept;
-  inline simdjson_result<document_stream> parse_many(const padded_string &&s, size_t batch_size) = delete;// unsafe
+  inline simdjson_result<document_stream> parse_many(const padded_string &&s, size_t batch_size = dom::DEFAULT_BATCH_SIZE) = delete;// unsafe
+  /** @overload parse_many(const uint8_t *buf, size_t len, size_t batch_size)
+   *
+   * Because padded_string_view guarantees SIMDJSON_PADDING trailing bytes, this
+   * overload is safe to use with buffers that the caller owns elsewhere (for
+   * example, a padded_memory_map), with no extra copy. Without this overload,
+   * passing a padded_string_view would silently bind to the padded_string
+   * overload via an implicit conversion, allocating and copying the input, and
+   * -- because that temporary is destroyed at the end of the full-expression --
+   * leaving the returned document_stream pointing at freed memory. */
+  inline simdjson_result<document_stream> parse_many(const padded_string_view &v, size_t batch_size = dom::DEFAULT_BATCH_SIZE) noexcept;
 
   /** @private We do not want to allow implicit conversion from C string to std::string. */
   simdjson_result<document_stream> parse_many(const char *buf, size_t batch_size = dom::DEFAULT_BATCH_SIZE) noexcept = delete;
+
+  /**
+   * Parse a stream of JSON documents with explicit format specification.
+   *
+   * @param buf The concatenated JSON documents.
+   * @param len The length of the buffer.
+   * @param batch_size The batch size to use.
+   * @param format The stream format.
+   * @return A stream of documents, or an error.
+   */
+  inline simdjson_result<document_stream> parse_many(const uint8_t *buf, size_t len, size_t batch_size, stream_format format) noexcept;
+  /** @overload parse_many(const uint8_t *buf, size_t len, size_t batch_size, stream_format format) */
+  inline simdjson_result<document_stream> parse_many(const char *buf, size_t len, size_t batch_size, stream_format format) noexcept;
+  /** @overload parse_many(const uint8_t *buf, size_t len, size_t batch_size, stream_format format) */
+  inline simdjson_result<document_stream> parse_many(const std::string &s, size_t batch_size, stream_format format) noexcept;
+  /** @overload parse_many(const uint8_t *buf, size_t len, size_t batch_size, stream_format format) */
+  inline simdjson_result<document_stream> parse_many(const padded_string &s, size_t batch_size, stream_format format) noexcept;
+  /** @overload parse_many(const uint8_t *buf, size_t len, size_t batch_size, stream_format format) */
+  inline simdjson_result<document_stream> parse_many(const padded_string_view &v, size_t batch_size, stream_format format) noexcept;
+  /** @private An rvalue input is destroyed at the end of the full-expression, while
+   * the returned document_stream only holds a pointer to it: iterating the stream would
+   * then read freed memory. These deleted overloads also catch a std::string_view
+   * argument, which would otherwise convert implicitly to a padded_string temporary. */
+  inline simdjson_result<document_stream> parse_many(const std::string &&s, size_t batch_size, stream_format format) = delete;// unsafe
+  /** @private @overload parse_many(const std::string &&s, size_t batch_size, stream_format format) */
+  inline simdjson_result<document_stream> parse_many(const padded_string &&s, size_t batch_size, stream_format format) = delete;// unsafe
 
   /**
    * Ensure this parser has enough memory to process JSON documents up to `capacity` bytes in length
@@ -495,7 +635,7 @@ public:
    *
    * @return Maximum depth, in bytes.
    */
-  simdjson_inline size_t max_depth() const noexcept;
+  simdjson_pure simdjson_inline size_t max_depth() const noexcept;
 
   /**
    * Set max_capacity. This is the largest document this parser can automatically support.
@@ -517,9 +657,14 @@ public:
   /**
    * The parser instance can use threads when they are available to speed up some
    * operations. It is enabled by default. Changing this attribute will change the
-   * behavior of the parser for future operations.
+   * behavior of the parser for future operations. Set to true by default.
    */
   bool threaded{true};
+#else
+  /**
+   * When SIMDJSON_THREADS_ENABLED is not defined, the parser instance cannot use threads.
+   */
+  bool threaded{false};
 #endif
   /** @private Use the new DOM API instead */
   class Iterator;
@@ -560,6 +705,13 @@ public:
   inline bool dump_raw_tape(std::ostream &os) const noexcept;
 
 
+  /**
+   * When enabled, big integers (exceeding uint64 range) are stored as strings
+   * in the tape instead of returning BIGINT_ERROR. Default: false.
+   */
+  inline void number_as_string(bool enabled) noexcept { _number_as_string = enabled; }
+  inline bool number_as_string() const noexcept { return _number_as_string; }
+
 private:
   /**
    * The maximum document length this parser will automatically support.
@@ -567,6 +719,9 @@ private:
    * The parser will not be automatically allocated above this amount.
    */
   size_t _max_capacity;
+
+  /** Whether to store big integers as strings instead of returning BIGINT_ERROR */
+  bool _number_as_string{false};
 
   /**
    * The loaded buffer (reused each time load() is called)
@@ -604,7 +759,7 @@ private:
   inline error_code ensure_capacity(document& doc, size_t desired_capacity) noexcept;
 
   /** Read the file into loaded_bytes */
-  inline simdjson_result<size_t> read_file(const std::string &path) noexcept;
+  inline simdjson_result<size_t> read_file(std::string_view path) noexcept;
 
   friend class parser::Iterator;
   friend class document_stream;

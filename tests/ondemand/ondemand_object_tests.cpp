@@ -1,3 +1,4 @@
+#define SIMDJSON_VERBOSE_LOGGING 1
 #include "simdjson.h"
 #include "test_ondemand.h"
 
@@ -6,7 +7,6 @@ using namespace simdjson;
 namespace object_tests {
   using namespace std;
   using simdjson::ondemand::json_type;
-
   bool issue1979() {
     TEST_START();
     auto json = R"({
@@ -22,6 +22,24 @@ namespace object_tests {
     ASSERT_SUCCESS(object["@avito-core/toggles:6.1.18"].get_object().error());
     TEST_SUCCEED();
   }
+
+
+  bool testing_to_string() {
+    TEST_START();
+    auto json = R"({"\u0062\u0065\u0062\u0065": 2} })"_padded;
+    ondemand::parser parser;
+    ondemand::document doc;
+    ASSERT_SUCCESS(parser.iterate(json).get(doc));
+    ondemand::object object;
+    ASSERT_SUCCESS(doc.get_object().get(object));
+    for (auto field : object) {
+      std::string key;
+      ASSERT_SUCCESS(field.unescaped_key().get(key));
+      ASSERT_EQUAL(key, "bebe");
+    }
+    TEST_SUCCEED();
+  }
+
 
   bool issue1977() {
     TEST_START();
@@ -221,6 +239,128 @@ namespace object_tests {
     TEST_SUCCEED();
   }
 
+  bool revert_position_after_missing_ordered_field() {
+    TEST_START();
+    simdjson::ondemand::parser parser;
+    simdjson::padded_string docdata = R"({"a":0, "b":1, "c":2, "d":3})"_padded;
+    simdjson::ondemand::document doc;
+    simdjson::ondemand::object obj;
+    int64_t num;
+
+    ASSERT_SUCCESS(parser.iterate(docdata).get(doc));
+    ASSERT_SUCCESS(doc.get_object().get(obj));
+    ASSERT_SUCCESS(obj.find_field("a").get(num));
+    ASSERT_EQUAL(num, 0);
+
+    // Ordered find_field only scans forward. Capture where we are right
+    // after "a", before probing an optional field that is not next.
+    auto position = obj.get_current_position();
+    assert_error(obj.find_field("x").get(num), NO_SUCH_FIELD);
+
+    // revert_position() returns to right after "a", without rescanning
+    // from the beginning: "b", "c" and "d" are all still reachable.
+    ASSERT_SUCCESS(obj.revert_position(position));
+    ASSERT_SUCCESS(obj.find_field("b").get(num));
+    ASSERT_EQUAL(num, 1);
+    ASSERT_SUCCESS(obj.find_field("c").get(num));
+    ASSERT_EQUAL(num, 2);
+    ASSERT_SUCCESS(obj.find_field("d").get(num));
+    ASSERT_EQUAL(num, 3);
+    TEST_SUCCEED();
+  }
+
+  bool revert_position_nested_object() {
+    TEST_START();
+    simdjson::ondemand::parser parser;
+    simdjson::padded_string docdata = R"({"arr":[{"a":0, "b":1, "c":2}]})"_padded;
+    simdjson::ondemand::document doc;
+    simdjson::ondemand::array arr;
+    simdjson::ondemand::object obj;
+    int64_t num;
+
+    // Exercise revert_position() on an object nested inside an array, so
+    // the object's own depth is not the trivial root case.
+    ASSERT_SUCCESS(parser.iterate(docdata).get(doc));
+    ASSERT_SUCCESS(doc["arr"].get_array().get(arr));
+    auto it = arr.begin();
+    simdjson::ondemand::value v;
+    ASSERT_SUCCESS((*it).get(v));
+    ASSERT_SUCCESS(v.get_object().get(obj));
+
+    ASSERT_SUCCESS(obj.find_field("a").get(num));
+    ASSERT_EQUAL(num, 0);
+    auto position = obj.get_current_position();
+    assert_error(obj.find_field("nope").get(num), NO_SUCH_FIELD);
+    ASSERT_SUCCESS(obj.revert_position(position));
+    ASSERT_SUCCESS(obj.find_field("b").get(num));
+    ASSERT_EQUAL(num, 1);
+    ASSERT_SUCCESS(obj.find_field("c").get(num));
+    ASSERT_EQUAL(num, 2);
+    TEST_SUCCEED();
+  }
+
+  bool revert_position_with_unconsumed_compound_value() {
+    TEST_START();
+    simdjson::ondemand::parser parser;
+    simdjson::padded_string docdata = R"({"a":[1,2,3], "c":4, "d":5})"_padded;
+    simdjson::ondemand::document doc;
+    simdjson::ondemand::object obj;
+    simdjson::ondemand::array arr;
+    int64_t num;
+
+    ASSERT_SUCCESS(parser.iterate(docdata).get(doc));
+    ASSERT_SUCCESS(doc.get_object().get(obj));
+
+    // Obtain "a" as an array but do not iterate or otherwise drain it.
+    // This leaves the live iterator mid-value on a compound value that is
+    // not fully consumed, which sits at a different depth than a scalar
+    // field like the one in revert_position_after_missing_ordered_field();
+    // get_current_position() must capture whichever depth is actually live.
+    ASSERT_SUCCESS(obj.find_field("a").get(arr));
+    auto position = obj.get_current_position();
+
+    // The miss scans past the still-open array (via skip_child()) before
+    // exhausting the remaining fields.
+    assert_error(obj.find_field("x").get(num), NO_SUCH_FIELD);
+
+    ASSERT_SUCCESS(obj.revert_position(position));
+    ASSERT_SUCCESS(obj.find_field("c").get(num));
+    ASSERT_EQUAL(num, 4);
+    ASSERT_SUCCESS(obj.find_field("d").get(num));
+    ASSERT_EQUAL(num, 5);
+    TEST_SUCCEED();
+  }
+
+  bool revert_position_simdjson_result_wrapper() {
+    TEST_START();
+    simdjson::ondemand::parser parser;
+    simdjson::padded_string docdata = R"({"a":0, "b":1, "c":2, "d":3})"_padded;
+    simdjson::ondemand::document doc;
+    int64_t num;
+
+    // Unlike revert_position_after_missing_ordered_field(), obj here stays a
+    // simdjson_result<object> throughout: get_current_position() and
+    // revert_position() are exercised through their simdjson_result<object>
+    // forwarders (object-inl.h), not by unwrapping to a plain object first.
+    ASSERT_SUCCESS(parser.iterate(docdata).get(doc));
+    simdjson::simdjson_result<simdjson::ondemand::object> obj = doc.get_object();
+    ASSERT_SUCCESS(obj.find_field("a").get(num));
+    ASSERT_EQUAL(num, 0);
+
+    simdjson::simdjson_result<simdjson::ondemand::object_position> position = obj.get_current_position();
+    ASSERT_SUCCESS(position);
+    assert_error(obj.find_field("x").get(num), NO_SUCH_FIELD);
+
+    ASSERT_SUCCESS(obj.revert_position(position.value_unsafe()));
+    ASSERT_SUCCESS(obj.find_field("b").get(num));
+    ASSERT_EQUAL(num, 1);
+    ASSERT_SUCCESS(obj.find_field("c").get(num));
+    ASSERT_EQUAL(num, 2);
+    ASSERT_SUCCESS(obj.find_field("d").get(num));
+    ASSERT_EQUAL(num, 3);
+    TEST_SUCCEED();
+  }
+
   bool missing_keys() {
     TEST_START();
     simdjson::ondemand::parser parser;
@@ -257,6 +397,19 @@ namespace object_tests {
   }
 
 #if SIMDJSON_EXCEPTIONS
+
+  bool testing_to_string_exception() {
+    TEST_START();
+    auto json = R"({"\u0062\u0065\u0062\u0065": 2} })"_padded;
+    ondemand::parser parser;
+    ondemand::document doc = parser.iterate(json);
+    ondemand::object object = doc.get_object();
+    for (auto field : object) {
+      std::string key;
+      ASSERT_SUCCESS(field.unescaped_key().get(key));
+    }
+    TEST_SUCCEED();
+  }
 
   bool issue1965() {
     TEST_START();
@@ -356,7 +509,7 @@ namespace object_tests {
   // used in issue_1521
   // difficult to use as a lambda because it is recursive.
   void broken_descend(ondemand::object node) {
-    if(auto type = node.find_field_unordered("type"); type.error() == SUCCESS && type == "child") {
+    if(auto type = node.find_field_unordered("type"); type.error() == SUCCESS && type.get_string().value() == "child") {
       auto n = node.find_field_unordered("name");
       if(n.error() == simdjson::SUCCESS) {
           std::cout << std::string_view(n) << std::endl;
@@ -399,7 +552,7 @@ namespace object_tests {
   // difficult to use as a lambda because it is recursive.
   void descend(ondemand::object node) {
     auto n = node.find_field_unordered("name");
-    if(auto type = node.find_field_unordered("type"); type.error() == SUCCESS && type == "child") {
+    if(auto type = node.find_field_unordered("type"); type.error() == SUCCESS && type.get_string().value() == "child") {
       if(n.error() == simdjson::SUCCESS) {
           std::cout << std::string_view(n) << std::endl;
       }
@@ -454,7 +607,7 @@ namespace object_tests {
         i++;
       }
       ASSERT_EQUAL( i*sizeof(uint64_t), sizeof(expected_value) );
-      doc_result.rewind();
+      ASSERT_SUCCESS( doc_result.rewind() );
       ASSERT_RESULT( doc_result.type(), json_type::object );
       ASSERT_SUCCESS( doc_result.get(object) );
       i = 0;
@@ -691,6 +844,22 @@ namespace object_tests {
       for (auto field : object) {
         std::string_view keyv;
         ASSERT_SUCCESS( field.unescaped_key().get(keyv) );
+        if(keyv == "key") {
+          int64_t value;
+          ASSERT_SUCCESS( field.value().get(value) );
+          ASSERT_EQUAL( value, 1);
+          got_key = true;
+        }
+      }
+      return got_key;
+    }));
+    SUBTEST("ondemand::unescapedkey(std)", test_ondemand_doc(json, [&](auto doc_result) {
+      ondemand::object object;
+      bool got_key = false;
+      ASSERT_SUCCESS( doc_result.get(object) );
+      for (auto field : object) {
+        std::string keyv;
+        ASSERT_SUCCESS( field.unescaped_key(keyv) );
         if(keyv == "key") {
           int64_t value;
           ASSERT_SUCCESS( field.value().get(value) );
@@ -968,6 +1137,26 @@ namespace object_tests {
     TEST_SUCCEED();
   }
 
+  bool manual_iterator_increment() {
+    // not recommended usage, but should work
+    TEST_START();
+    auto json = R"( {"1":1, "2":2, "3":3} )"_padded;
+    ondemand::parser parser;
+    ondemand::document doc;
+    ASSERT_SUCCESS(parser.iterate(json).get(doc));
+    ondemand::object obj;
+    ASSERT_SUCCESS(doc.get_object().get(obj));
+    std::cout << "object obtained.\n";
+    auto it = obj.begin();
+    *it; // essential !!!
+    ++it;
+    auto field = *it;
+    std::string_view key;
+    ASSERT_SUCCESS(field.unescaped_key().get(key));
+    std::cout << "Key: " << key << std::endl;
+    ASSERT_EQUAL(key, "2");
+    TEST_SUCCEED();
+  }
   bool issue1876() {
     TEST_START();
     auto json = R"( {} )"_padded;
@@ -1294,13 +1483,16 @@ namespace object_tests {
   }
 
   bool run() {
-    return issue1979() &&
+    return testing_to_string() &&
+           issue1979() &&
            issue1977() &&
 #if SIMDJSON_EXCEPTIONS
+           testing_to_string_exception() &&
            issue1965() &&
 #endif
            issue1974a() &&
            issue1974b() &&
+           manual_iterator_increment() &&
            issue1876a() &&
            issue1876() &&
            test_strager() &&
@@ -1310,6 +1502,10 @@ namespace object_tests {
            issue1723() &&
            value_search_unescaped_key() &&
            missing_key_continue() &&
+           revert_position_after_missing_ordered_field() &&
+           revert_position_nested_object() &&
+           revert_position_with_unconsumed_compound_value() &&
+           revert_position_simdjson_result_wrapper() &&
            no_missing_keys() &&
            missing_keys() &&
            missing_keys_for_empty_top_level_object() &&

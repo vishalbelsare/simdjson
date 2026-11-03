@@ -1,24 +1,32 @@
 The Document-Object-Model (DOM) front-end
 ==========
 
-An overview of what you need to know to use simdjson, with examples.
+An overview of what you need to know to use simdjson to parse JSON documents with
+our DOM API, with examples. [Our documentation regarding the generation (serialization) of JSON documents is in a
+separate document](https://github.com/simdjson/simdjson/blob/master/doc/builder.md).
 
-* [DOM vs On Demand](#dom-vs-on-demand)
+
+* [DOM vs On-Demand](#dom-vs-on-demand)
 * [The Basics: Loading and Parsing JSON Documents](#the-basics-loading-and-parsing-json-documents-using-the-dom-front-end)
 * [Using the Parsed JSON](#using-the-parsed-json)
+* [Reverse Array Iteration](#reverse-array-iteration)
 * [C++17 Support](#c17-support)
+* [C++20 Support](#c20-support)
 * [JSON Pointer](#json-pointer)
+* [JSONPath](#jsonpath)
 * [Error Handling](#error-handling)
   * [Error Handling Example](#error-handling-example)
   * [Exceptions](#exceptions)
 * [Tree Walking and JSON Element Types](#tree-walking-and-json-element-types)
+* [Limiting the maximum depth](#limiting-the-maximum-depth)
 * [Reusing the parser for maximum efficiency](#reusing-the-parser-for-maximum-efficiency)
 * [Server Loops: Long-Running Processes and Memory Capacity](#server-loops-long-running-processes-and-memory-capacity)
 * [Best Use of the DOM API](#best-use-of-the-dom-api)
 * [Padding and Temporary Copies](#padding-and-temporary-copies)
+* [Parsing Without Padding](#parsing-without-padding)
 * [Performance Tips](#performance-tips)
 
-DOM vs On Demand
+DOM vs On-Demand
 ----------------------------------------------
 
 The simdjson library offers two distinct approaches on how to access a JSON document. We support
@@ -26,13 +34,17 @@ a conventional Document-Object-Model (DOM) front-end. In such a scenario, the JS
 entirely parsed, validated and materialized in memory as the first step. The programmer may
 then access the parsed data using this in-memory model.
 
+On-Demand is a different model where you parse just what you need, directly into your own
+data structure. The On-Demand approach, when well tuned, can provide superior performance.
+[We refer you to the On-Demand documentation for further details](https://github.com/simdjson/simdjson/blob/master/doc/basics.md).
+
 The Basics: Loading and Parsing JSON Documents using the DOM front-end
 ----------------------------------------------
 
 The simdjson library offers a simple DOM tree API, which you can access by creating a
 `dom::parser` and calling the `load()` method:
 
-```c++
+```cpp
 dom::parser parser;
 dom::element doc = parser.load(filename); // load and parse a file
 ```
@@ -40,23 +52,61 @@ dom::element doc = parser.load(filename); // load and parse a file
 Or by creating a padded string (for efficiency reasons, simdjson requires a string with
 SIMDJSON_PADDING bytes at the end) and calling `parse()`:
 
-```c++
+```cpp
 dom::parser parser;
 dom::element doc = parser.parse("[1,2,3]"_padded); // parse a string, the _padded suffix creates a simdjson::padded_string instance
 ```
 
+You can also load a `padded_string` from a file.
+
+
+```cpp
+auto json = padded_string::load("twitter.json"); // load JSON file 'twitter.json'.
+dom::element doc = parser.parse(json);
+```
+
+[You can similarly fetch a file from a URL to a padded string](https://github.com/simdjson/curltostring) using our `simdjson::padded_string_builder`.
+
+(Windows users compiling with C++17 or better may use `wchar_t` strings to support non-ASCII
+filenames: `padded_string::load(L"twitter.json")`.)
+
+
+(Windows users compiling with C++17 or better may use `wchar_t` strings to support non-ASCII
+filenames: `padded_string::load(L"twitter.json")`.)
+
+
 You can copy your data directly on a `simdjson::padded_string` as follows:
 
-```c++
+```cpp
 const char * data = "my data"; // 7 bytes
 simdjson::padded_string my_padded_data(data, 7); // copies to a padded buffer
 ```
 
 Or as follows...
 
-```c++
+```cpp
 std::string data = "my data";
 simdjson::padded_string my_padded_data(data); // copies to a padded buffer
+```
+
+You can then parse the JSON document from the `simdjson::padded_string` instance:
+
+```cpp
+simdjson::dom::parser parser;
+simdjson::dom::element doc = parser.parse(my_padded_data);
+```
+
+Whenever you pass an `std::string` reference to `parser::parse`,
+the parser will access the bytes beyond the end of
+the string but before the end of the allocated memory (`std::string::capacity()`).
+If you are using a sanitizer that checks for reading uninitialized bytes or `std::string`'s
+container-overflow checks, you may encounter sanitizer warnings.
+You can safely ignore these warnings. Or you can call `simdjson::pad(std::string&)` to pad the
+string with `SIMDJSON_PADDING` spaces: this function returns a `simdjson::padding_string_view` which can be be passed to the parser's iterator function:
+
+```cpp
+std::string json = "[1]";
+dom::element doc = parser.parse(simdjson::pad(json));
 ```
 
 The parsed document resulting from the `parser.load` and `parser.parse` calls depends on the `parser` instance. Thus the `parser` instance must remain in scope. Furthermore, you must have at most one parsed document in play per `parser` instance.
@@ -69,8 +119,50 @@ During the`load` or `parse` calls, neither the input file nor the input string a
 For best performance, a `parser` instance should be reused over several files: otherwise you will needlessly reallocate memory, an expensive process. It is also possible to avoid entirely memory allocations during parsing when using simdjson. [See our performance notes for details](performance.md).
 
 If you need a lower-level interface, you may call the function `parser.parse(const char * p, size_t l)` on a pointer `p` while specifying the
-length of your input `l` in bytes. To see how to get the very best performance from a low-level approach, you way want to read our [performance notes](https://github.com/simdjson/simdjson/blob/master/doc/performance.md#padding-and-temporary-copies) on this topic (see the Padding and Temporary Copies section).
+length of your input `l` in bytes.
 
+*Windows-specific*:  Windows users who need to read files with
+non-ANSI characters in the name should set their code page to
+UTF-8 (65001). This should be the default with Windows 11 and better.
+Further, they may use the AreFileApisANSI function to determine whether
+the filename is interpreted using the ANSI or the system default OEM
+codepage, and they may call SetFileApisToOEM accordingly.
+
+
+**Advanced feature:**
+You can use `simdjson::padded_memory_map` to create a `simdjson::padded_string_view`
+from a file on disk without copying the file contents into your own buffer.
+On POSIX systems (Linux, macOS, BSD, ...) it uses `mmap` for true zero-copy
+access. On Windows it is available as an **opt-in** feature and requires:
+
+1. Building simdjson with `-DSIMDJSON_ENABLE_MEMORY_FILE_MAPPING_ON_WINDOWS=ON`, or
+   defining `SIMDJSON_ENABLE_MEMORY_FILE_MAPPING_ON_WINDOWS=1` and raising
+   `NTDDI_VERSION` to at least `NTDDI_WIN10_RS4` (Windows 10, version 1803)
+   and linking `onecore.lib` manually if you are consuming simdjson as a
+   pre-built library.
+2. `#include <windows.h>` before `#include "simdjson.h"` in every
+   translation unit where you want to use `padded_memory_map`.
+
+When enabled on Windows, the implementation uses `CreateFileMapping2` and
+`MapViewOfFile3` for true zero-copy mapping whenever the file does not end
+within `SIMDJSON_PADDING` bytes of a page boundary; otherwise it falls back
+to reading the file into a padded heap buffer. If those requirements are
+not met, the class is not declared and the code below will fail to compile.
+
+```cpp
+#ifdef _WIN32
+#include <windows.h> // Must come BEFORE <simdjson.h> on Windows
+#endif
+#include "simdjson.h"
+// ...
+simdjson::padded_memory_map map(TWITTER_JSON);
+if (!map.is_valid()) { /* handle error */ }
+simdjson::padded_string_view view = map.view(); // view is usable while padded_memory_map is in scope
+ondemand::document doc = parser.iterate(view); // parse the JSON
+```
+
+Using memory-file mapping requires some care. The file should not be modified while you are
+accessing it.
 
 Using the Parsed JSON
 ---------------------
@@ -81,9 +173,10 @@ Once you have an element, you can navigate it with idiomatic C++ iterators, oper
   `double x = json_element`. This works for double, uint64_t, int64_t, bool,
   dom::object and dom::array. An exception (`simdjson::simdjson_error`) is thrown if the cast is not possible.
 * **Extracting Values (without exceptions):** You can use a variant usage of `get()` with error codes to avoid exceptions. You first declare the variable of the appropriate type (`double`, `uint64_t`, `int64_t`, `bool`, `std::string_view`,
-  `dom::object` and `dom::array`) and pass it by reference to `get()` which gives you back an error code: e.g.,
-  ```c++
+  `std::u8string_view` (C++20), `dom::object` and `dom::array`) and pass it by reference to `get()` which gives you back an error code: e.g.,
+  ```cpp
   simdjson::error_code error;
+  // _padded returns an simdjson::padded_string instance
   simdjson::padded_string numberstring = "1.2"_padded; // our JSON input ("1.2")
   simdjson::dom::parser parser;
   double value; // variable where we store the value to be parsed
@@ -92,6 +185,29 @@ Once you have an element, you can navigate it with idiomatic C++ iterators, oper
   std::cout << "I parsed " << value << " from " << numberstring.data() << std::endl;
   ```
   The strings contain unescaped valid UTF-8 strings: no unmatched surrogate is allowed.
+  Internally, numbers are stored as either 64-bit integers or 64-bit floating-point numbers.
+  Thus it is possible to get the full 64-bit integer range (either signed or  unsigned).
+  By default, the string `-0` is parsed as the integer 0 as in Python or C++. If you set the macro
+  `SIMDJSON_MINUS_ZERO_AS_FLOAT` to `1` when building simdjson, you can get that `-0` is mapped to `-0.0`
+  as in JavaScript. You can get the desired effect by building simdjson with cmake setting the
+  `SIMDJSON_MINUS_ZERO_AS_FLOAT` to on: `cmake -B build -D SIMDJSON_MINUS_ZERO_AS_FLOAT=ON`.
+* **Big Integer Support (opt-in):** By default, integers that exceed the 64-bit range cause parsing to fail with `BIGINT_ERROR`. You can opt in to big integer support so that these numbers are stored as raw digit strings on the tape instead:
+  ```cpp
+  simdjson::dom::parser parser;
+  parser.number_as_string(true); // opt-in, default false
+  simdjson::dom::element doc;
+  auto error = parser.parse("[1, 123456789012345678901]"_padded).get(doc);
+  if (error) { std::cerr << error << std::endl; return EXIT_FAILURE; }
+  for (simdjson::dom::element elem : doc) {
+    if (elem.is_bigint()) {
+      std::string_view digits;
+      error = elem.get_bigint().get(digits);
+      if (error) { std::cerr << error << std::endl; return EXIT_FAILURE; }
+      std::cout << "big integer: " << digits << std::endl;
+    }
+  }
+  ```
+  When enabled, big integers have type `element_type::BIGINT`. Calling `get_int64()`, `get_uint64()`, or `get_double()` on a big integer returns `INCORRECT_TYPE`. Normal numbers (int64, uint64, double) are unaffected.
 * **Field Access:** To get the value of the "foo" field in an object, use `object["foo"]`.
 * **Array Iteration:** To iterate through an array, use `for (auto value : array) { ... }`. If you
   know the type of the value, you can cast it right there, too! `for (double value : array) { ... }`
@@ -104,14 +220,15 @@ Once you have an element, you can navigate it with idiomatic C++ iterators, oper
 * **Array and Object size** Given an array or an object, you can get its size (number of elements or keys)
   with the `size()` method.
 * **Checking an Element Type:** You can check an element's type with `element.type()`. It
-  returns an `element_type` with values such as `simdjson::dom::element_type::ARRAY`, `simdjson::dom::element_type::OBJECT`, `simdjson::dom::element_type::INT64`,  `simdjson::dom::element_type::UINT64`,`simdjson::dom::element_type::DOUBLE`, `simdjson::dom::element_type::STRING`, `simdjson::dom::element_type::BOOL` or, `simdjson::dom::element_type::NULL_VALUE`.
-* **Output to streams and strings:** Given a document or an element (or node) out of a JSON document, you can output a minified string version using the C++ stream idiom (`out << element`). You can also request the construction of a minified string version (`simdjson::minify(element)`). Numbers are serialized as 64-bit floating-point numbers (`double`).
+  returns an `element_type` with values such as `simdjson::dom::element_type::ARRAY`, `simdjson::dom::element_type::OBJECT`, `simdjson::dom::element_type::INT64`,  `simdjson::dom::element_type::UINT64`,`simdjson::dom::element_type::DOUBLE`, `simdjson::dom::element_type::STRING`, `simdjson::dom::element_type::BOOL`, `simdjson::dom::element_type::NULL_VALUE` or, `simdjson::dom::element_type::BIGINT` (when big integer support is enabled).
+* **Output to streams and strings:** Given a document or an element (or node) out of a JSON document, you can output a minified string version using the C++ stream idiom (`out << element`). You can also request the construction of a minified string version (`simdjson::minify(element)`) or a prettified string version (`simdjson::prettify(element)`). For the prettified version, you can also specify the number of spaces for each level of indentation (`simdjson::prettify(element, 2)`); the default is 4. An indentation step less than or equal to zero inserts newlines without indentation. Numbers are serialized as 64-bit floating-point numbers (`double`).
 
 ### Examples
 
 The following code illustrates all of the above:
 
-```c++
+```cpp
+//  R"( ... )" is a C++ raw string literal.
 auto cars_json = R"( [
   { "make": "Toyota", "model": "Camry",  "year": 2018, "tire_pressure": [ 40.1, 39.9, 37.7, 40.4 ] },
   { "make": "Kia",    "model": "Soul",   "year": 2012, "tire_pressure": [ 30.1, 31.0, 28.6, 28.7 ] },
@@ -144,7 +261,7 @@ for (dom::object car : parser.parse(cars_json)) {
 
 Here is a different example illustrating the same ideas:
 
-```C++
+```cpp
 auto abstract_json = R"( [
     {  "12345" : {"a":12.34, "b":56.78, "c": 9998877}   },
     {  "12545" : {"a":11.44, "b":12.78, "c": 11111111}  }
@@ -166,7 +283,7 @@ for (dom::object obj : parser.parse(abstract_json)) {
 And another one:
 
 
-```C++
+```cpp
   auto abstract_json = R"(
     {  "str" : { "123" : {"abc" : 3.14 } } } )"_padded;
   dom::parser parser;
@@ -175,12 +292,49 @@ And another one:
 ```
 
 
+Reverse Array Iteration
+----------------------
+
+Use `rbegin()` and `rend()` to visit the immediate elements of a DOM array from
+last to first. Incrementing a reverse iterator moves toward the start of the
+array; nested arrays and objects are returned as individual elements.
+
+```cpp
+simdjson::dom::parser parser;
+simdjson::padded_string json("[1,2,3]", 7);
+simdjson::dom::array values;
+auto error = parser.parse(json).get_array().get(values);
+if (error) { std::cerr << error << std::endl; return; }
+for (auto it = values.rbegin(); it != values.rend(); ++it) {
+  std::cout << *it << std::endl; // 3, then 2, then 1
+}
+```
+
+An empty array has `rbegin() == rend()`. The reverse iterator is a forward
+iterator in reverse document order: it supports copying, dereferencing,
+incrementing, and equality comparisons, but not decrementing. As with forward
+iteration, the document must remain alive and must not be overwritten by another
+parse while its iterators or elements are in use.
+
+A complete reverse traversal takes O(n) time for n immediate array elements,
+uses O(1) additional space, and does not allocate or change the tape. Most steps
+take constant time. When numeric payload bits coincide with numeric type markers,
+locating the previous element can require scanning a run of markers. An
+individual `rbegin()` or increment can therefore take O(n) time in the worst
+case. Increments are amortized O(1) over a complete traversal, including arrays
+with nested values. The existing forward iterator remains unchanged; this API
+does not make the array bidirectional or enable `std::views::reverse(array)`.
+
+With exceptions enabled, `simdjson_result<dom::array>` also exposes `rbegin()`
+and `rend()` and throws its stored error if the result is unsuccessful. With
+exceptions disabled, obtain a `dom::array` with `.get(array)` as above.
+
 C++17 Support
 -------------
 
 While the simdjson library can be used in any project using C++ 11 and above, field iteration has special support C++ 17's destructuring syntax. For example:
 
-```c++
+```cpp
 padded_string json = R"(  { "foo": 1, "bar": 2 }  )"_padded;
 dom::parser parser;
 dom::object object; // invalid until the get() succeeds
@@ -193,7 +347,7 @@ for (auto [key, value] : object) {
 
 For comparison, here is the C++ 11 version of the same code:
 
-```c++
+```cpp
 // C++ 11 version for comparison
 padded_string json = R"(  { "foo": 1, "bar": 2 }  )"_padded;
 dom::parser parser;
@@ -205,6 +359,23 @@ for (dom::key_value_pair field : object) {
 }
 ```
 
+C++20 Support
+------------
+
+simdjson library also supports some C++20 feature including `std::ranges`:
+
+```cpp
+auto cars_json = R"( [
+  { "make": "Toyota", "model": "Camry",  "year": 2018, "tire_pressure": [ 40.1, 39.9, 37.7, 40.4 ] },
+  { "make": "Kia",    "model": "Soul",   "year": 2012, "tire_pressure": [ 30.1, 31.0, 28.6, 28.7 ] },
+  { "make": "Toyota", "model": "Tercel", "year": 1999, "tire_pressure": [ 29.8, 30.0, 30.2, 30.5 ] }
+] )"_padded;
+dom::parser parser;
+auto justmodel = [](auto car) { return car["model"]; };
+for (auto car : parser.parse(cars_json).get_array() | std::views::transform(justmodel)) {
+  std::cout << car << std::endl;
+}
+```
 
 JSON Pointer
 ------------
@@ -212,7 +383,7 @@ JSON Pointer
 The simdjson library also supports [JSON pointer](https://tools.ietf.org/html/rfc6901) through the
 `at_pointer()` method, letting you reach further down into the document in a single call:
 
-```c++
+```cpp
 auto cars_json = R"( [
   { "make": "Toyota", "model": "Camry",  "year": 2018, "tire_pressure": [ 40.1, 39.9, 37.7, 40.4 ] },
   { "make": "Kia",    "model": "Soul",   "year": 2012, "tire_pressure": [ 30.1, 31.0, 28.6, 28.7 ] },
@@ -223,17 +394,17 @@ dom::element cars = parser.parse(cars_json);
 cout << cars.at_pointer("/0/tire_pressure/1") << endl; // Prints 39.9
 ```
 
-A JSON Path is a sequence of segments each starting with the '/' character. Within arrays, an integer
+A JSON Pointer expression is a sequence of segments each starting with the '/' character. Within arrays, an integer
 index allows you to select the indexed node. Within objects, the string value of the key allows you to
 select the value. If your keys contain the characters '/' or '~', they must be escaped as '~1' and
-'~0' respectively. An empty JSON Path refers to the whole document.
+'~0' respectively. An empty JSON Pointer expression refers to the whole document.
 
 We also extend the JSON Pointer support to include *relative* paths.
-You can apply a JSON path to any node and the path gets interpreted relatively, as if the current node were a whole JSON document.
+You can apply a JSON Pointer expression to any node and the path gets interpreted relatively, as if the current node were a whole JSON document.
 
 Consider the following example:
 
-```c++
+```cpp
 auto cars_json = R"( [
   { "make": "Toyota", "model": "Camry",  "year": 2018, "tire_pressure": [ 40.1, 39.9, 37.7, 40.4 ] },
   { "make": "Kia",    "model": "Soul",   "year": 2012, "tire_pressure": [ 30.1, 31.0, 28.6, 28.7 ] },
@@ -251,7 +422,118 @@ for (dom::element car_element : cars) {
 }
 ```
 
+JSONPath
+------------
 
+
+The simdjson library supports a subset of [JSONPath](https://www.rfc-editor.org/rfc/rfc9535) (RFC 9535) through the `at_path()` method, allowing you to reach further into the document in a single call. The subset of JSONPath that is implemented is the subset that is trivially convertible into the JSON Pointer format, using `.` to access a field and `[]` to access a specific index.
+
+Consider the following example:
+
+```cpp
+auto cars_json = R"( [
+  { "make": "Toyota", "model": "Camry",  "year": 2018, "tire_pressure": [ 40.1, 39.9, 37.7, 40.4 ] },
+  { "make": "Kia",    "model": "Soul",   "year": 2012, "tire_pressure": [ 30.1, 31.0, 28.6, 28.7 ] },
+  { "make": "Toyota", "model": "Tercel", "year": 1999, "tire_pressure": [ 29.8, 30.0, 30.2, 30.5 ] }
+] )"_padded;
+dom::parser parser;
+dom::element doc;
+auto error = parser.parse(cars_json).get(doc);
+if(error) { /*won't happen*/ }
+double p;
+error = doc.at_path("[0].tire_pressure[1]").get(p);
+if(error) { /*won't happen*/ }
+cout << p << endl; // Prints 39.9
+```
+
+
+We also support the `$` prefix. When you start a JSONPath expression with $, you are indicating that the path starts from the root of the JSON document. E.g.,
+
+```cpp
+auto json = R"( { "c" :{ "foo": { "a": [ 10, 20, 30 ] }}, "d": { "foo2": { "a": [ 10, 20, 30 ] }} , "e": 120 })"_padded;
+dom::parser parser;
+dom::element doc;
+auto error = parser.parse(json).get(doc);
+if(error) { /*won't happen*/ }
+dom::object obj;
+error = doc.get_object().get(obj);
+if(error) { /*won't happen*/ }
+int64_t x;
+error = obj.at_path("$[3].foo.a[1]").get(x);
+if(error) { /*won't happen*/ }
+if(x != 20) { /*won't happen*/ }
+x = obj.at_path("$.d.foo2.a.2");
+if(error) { /*won't happen*/ }
+```
+
+
+## Using `at_path_with_wildcard` for JSONPath Queries
+
+The `at_path_with_wildcard` function in simdjson extends the JSONPath querying capabilities by supporting wildcard expressions (`*`) in JSON paths. This allows users to retrieve multiple elements from a JSON document in a single query. For example, you can use `$.address.*` to fetch all fields within the `address` object or `$.phoneNumbers[*].numbers[*]` to retrieve all phone numbers across multiple objects in an array.
+
+The `*` wildcard matches all elements at a specific level. For instance, `$.address.*` retrieves all key-value pairs in the `address` object, while `$.*.streetAddress` fetches all `streetAddress` fields across objects at the root level.  You can combine wildcards with array indexing. For example, `$.phoneNumbers[*].numbers[1]` retrieves the second number from each `numbers` array in the `phoneNumbers` array. If no elements match the wildcard query, the function returns an empty result. For instance, querying `$.empty_object.*` or `$.empty_array.*` will yield an empty set. A path that cannot be parsed (e.g., `$.phoneNumbers[*]['type`) returns `INVALID_JSON_POINTER`, whatever the document.
+
+### Example Usage
+
+Here is an example demonstrating the use of `at_path_with_wildcard`:
+
+```cpp
+simdjson::padded_string json_string = R"(
+{
+  "firstName": "John",
+  "lastName": "doe",
+  "age": 26,
+  "address": {
+    "streetAddress": "naist street",
+    "city": "Nara",
+    "postalCode": "630-0192"
+  },
+  "phoneNumbers": [
+    {
+      "type": "iPhone",
+      "numbers": ["0123-4567-8888", "0123-4567-8788"]
+    },
+    {
+      "type": "home",
+      "numbers": ["0123-4567-8910"]
+    }
+  ]
+})"_padded;
+
+dom::parser parser;
+dom::element parsed_json = parser.parse(json_string);
+std::vector<dom::element> values;
+
+// Fetch all fields in the address object
+auto error = parsed_json.at_path_with_wildcard("$.address.*").get(values);
+if(error) {
+  // do something
+}
+for (auto &value : values) {
+  std::string_view field;
+  error = value.get(field);
+  if(error) {
+    // do something
+  }
+  std::cout << field << std::endl;
+}
+
+// Fetch all phone numbers
+error = parsed_json.at_path_with_wildcard("$.phoneNumbers[*].numbers[*]").get(values);
+if(error) {
+  // do something
+}
+for (auto &value : values) {
+  std::string_view number;
+  error = value.get(number);
+  if(error) {
+    // do something
+  }
+  std::cout << number << std::endl;
+}
+```
+
+This function is particularly useful for extracting data from complex JSON structures with nested arrays and objects. By leveraging wildcards, you can simplify your queries and reduce the need for multiple iterations.
 
 Error Handling
 --------------
@@ -259,7 +541,7 @@ Error Handling
 All simdjson APIs that can fail return `simdjson_result<T>`, which is a &lt;value, error_code&gt;
 pair. You can retrieve the value with .get(), like so:
 
-```c++
+```cpp
 dom::element doc;
 auto error = parser.parse(json).get(doc);
 if (error) { cerr << error << endl; exit(1); }
@@ -293,7 +575,7 @@ We can write a "quick start" example where we attempt to parse the following JSO
 Our program loads the file, selects value corresponding to key "search_metadata" which expected to be an object, and then
 it selects the key "count" within that object.
 
-```C++
+```cpp
 #include <iostream>
 #include "simdjson.h"
 
@@ -321,7 +603,7 @@ triggering exceptions. To do this, we use `["statuses"].at(0)["id"]`. We break t
 
 Observe how we use the `at` method when querying an index into an array, and not the bracket operator.
 
-```C++
+```cpp
 #include <iostream>
 #include "simdjson.h"
 
@@ -329,10 +611,10 @@ int main(void) {
   simdjson::dom::parser parser;
   simdjson::dom::element tweets; // invalid until the get() succeeds
   auto error = parser.load("twitter.json").get(tweets);
-  if(error) { std::cerr << error << std::endl; return EXIT_FAILURE; }
+  if (error) { std::cerr << error << std::endl; return EXIT_FAILURE; }
   uint64_t identifier;
   error = tweets["statuses"].at(0)["id"].get(identifier);
-  if(error) { std::cerr << error << std::endl; return EXIT_FAILURE; }
+  if (error) { std::cerr << error << std::endl; return EXIT_FAILURE; }
   std::cout << identifier << std::endl;
   return EXIT_SUCCESS;
 }
@@ -345,7 +627,7 @@ over the content of an array.
 
 This is how the example in "Using the Parsed JSON" could be written using only error code checking:
 
-```c++
+```cpp
 auto cars_json = R"( [
   { "make": "Toyota", "model": "Camry",  "year": 2018, "tire_pressure": [ 40.1, 39.9, 37.7, 40.4 ] },
   { "make": "Kia",    "model": "Soul",   "year": 2012, "tire_pressure": [ 30.1, 31.0, 28.6, 28.7 ] },
@@ -392,7 +674,7 @@ for (dom::element car_element : cars) {
 
 Here is another example:
 
-```C++
+```cpp
 auto abstract_json = R"( [
     {  "12345" : {"a":12.34, "b":56.78, "c": 9998877}   },
     {  "12545" : {"a":11.44, "b":12.78, "c": 11111111}  }
@@ -425,7 +707,7 @@ for (dom::element elem : array) {
 
 And another one:
 
-```C++
+```cpp
   auto abstract_json = R"(
     {  "str" : { "123" : {"abc" : 3.14 } } } )"_padded;
   dom::parser parser;
@@ -439,7 +721,7 @@ Notice how we can string several operations (`parser.parse(abstract_json)["str"]
 
 The next two functions will take as input a JSON document containing an array with a single element, either a string or a number. They return true upon success.
 
-```C++
+```cpp
 simdjson::dom::parser parser{};
 
 bool parse_double(const char *j, double &d) {
@@ -471,7 +753,7 @@ target_compile_definitions(simdjson PUBLIC SIMDJSON_EXCEPTIONS=OFF)
 
 Users more comfortable with an exception flow may choose to directly cast the `simdjson_result<T>` to the desired type:
 
-```c++
+```cpp
 dom::element doc = parser.parse(json); // Throws an exception if there was an error!
 ```
 
@@ -481,7 +763,7 @@ program from continuing if there was an error.
 
 If one is willing to trigger exceptions, it is possible to write simpler code:
 
-```C++
+```cpp
 #include <iostream>
 #include "simdjson.h"
 
@@ -502,7 +784,7 @@ inspect or walk over JSON elements. To do that, you can use iterators and the ty
 example, here's a quick and dirty recursive function that verbosely prints the JSON document as JSON
 (* ignoring nuances like trailing commas and escaping strings, for brevity's sake):
 
-```c++
+```cpp
 void print_json(dom::element element) {
   switch (element.type()) {
     case dom::element_type::ARRAY:
@@ -548,6 +830,45 @@ void basics_treewalk_1() {
 }
 ```
 
+Notice that we do not include `dom::element_type::BIGINT` in this example
+as `dom::element_type::BIGINT` type is only generated if the parser was
+set to support big integers (`parser.number_as_string(true)`).
+
+
+Limiting the maximum depth
+--------------------------
+
+JSON documents can be nested arbitrarily deeply (`[[[[[[ ... ]]]]]]`). The simdjson
+library parses such documents iteratively: however deep the document is, parsing it
+costs the library no stack space.
+
+Code that walks the result is another matter. A recursive function applied to a document
+nested a thousand levels deep needs a thousand stack frames. Running out of stack is not
+a recoverable error: there is no exception and no error code, just a crash. A hostile
+input of a few kilobytes (`[[[[[[...`) is enough to cause one.
+
+So decide how deeply nested a document you are willing to accept, and tell the parser.
+The DOM parser refuses to parse a document nested more deeply than its `max_depth`, and
+reports `DEPTH_ERROR`:
+
+```cpp
+dom::parser parser;
+// We refuse documents nested more than 30 levels deep.
+auto error = parser.allocate(0, 30);
+if (error) { /* allocation failure */ }
+auto result = parser.parse(json); // DEPTH_ERROR if json is nested too deeply
+```
+
+The first argument to `allocate` is a capacity to reserve up front, not a limit: passing
+zero is fine, and the parser still grows its buffers by itself as documents are passed
+to it. If you know how large your documents are, you can skip the initial reallocations
+by reserving the capacity, e.g., `parser.allocate(1024 * 1024, 30)`. To put a hard limit
+on the document size, use `parser.set_max_capacity(1024 * 1024)`.
+
+The default depth limit is 1024 (`simdjson::DEFAULT_MAX_DEPTH`). Real-world JSON is
+rarely nested more than a handful of levels, so a limit like 30 is generous, and it
+keeps a recursive traversal to a few tens of kilobytes of stack. You can query the
+current setting with `parser.max_depth()`.
 
 
 Reusing the parser for maximum efficiency
@@ -558,7 +879,7 @@ and reuse it. The simdjson library will allocate and retain internal buffers bet
 buffers hot in cache and keeping memory allocation and initialization to a minimum. In this manner,
 you can parse terabytes of JSON data without doing any new allocation.
 
-```c++
+```cpp
 dom::parser parser;
 
 // This initializes buffers and a document big enough to handle this JSON.
@@ -601,7 +922,7 @@ without bound:
 
 * You can set a *max capacity* when constructing a parser:
 
-  ```c++
+  ```cpp
   dom::parser parser(1000*1000); // Never grow past documents > 1MB
   for (web_request request : listen()) {
     dom::element doc;
@@ -617,7 +938,7 @@ without bound:
 * You can set a *fixed capacity* that never grows, as well, which can be excellent for
   predictability and reliability, since simdjson will never call malloc after startup!
 
-  ```c++
+  ```cpp
   dom::parser parser(0); // This parser will refuse to automatically grow capacity
   auto error = parser.allocate(1000*1000); // This allocates enough capacity to handle documents <= 1MB
   if (error) { cerr << error << endl; exit(1); }
@@ -648,7 +969,7 @@ When calling `parser.parse` on a pointer (e.g., `parser.parse(my_char_pointer, m
 Some users may not be able use our `padded_string` class or to load the data directly from disk (`parser.load`). They may need to pass data pointers to the library.  If these users wish to avoid temporary copies and corresponding temporary memory allocations, they may want to call `parser.parse` with the `realloc_if_needed` parameter set to false (e.g., `parser.parse(my_char_pointer, my_length_in_bytes, false)`). In such cases, they need to ensure that there are at least SIMDJSON_PADDING extra bytes at the end that can be safely accessed and read. They do not need to initialize the padded bytes to any value in particular. The following example is safe:
 
 
-```C++
+```cpp
 const char *json      = R"({"key":"value"})";
 const size_t json_len = std::strlen(json);
 std::unique_ptr<char[]> padded_json_copy{new char[json_len + SIMDJSON_PADDING]};
@@ -656,12 +977,44 @@ memcpy(padded_json_copy.get(), json, json_len);
 memset(padded_json_copy.get() + json_len, 0, SIMDJSON_PADDING);
 simdjson::dom::parser parser;
 simdjson::dom::element element = parser.parse(padded_json_copy.get(), json_len, false);
-````
+```
 
 Setting the `realloc_if_needed` parameter `false` in this manner may lead to better performance since copies are avoided, but it requires that the user takes more responsibilities: the simdjson library cannot verify that the input buffer was padded with SIMDJSON_PADDING extra bytes.
+
+If you are compiling your project with C++17 or better, you can use a `simdjson::padded_input`:
+
+```cpp
+simdjson::dom::parser parser;
+std::string_view json = "[1,2,3]";
+simdjson::padded_input input(json); // Automatically pads if needed
+simdjson::dom::element element = parser.parse(input);
+```
+
+The actual padding only occurs if the JSON string ends near the boundary of a memory page, which is uncommon. Using a `simdjson::padded_input` is safe although sanitizers and tools like valgrind might report illegal reads (which are safe in our case because they remain in the mapped page). You should avoid `simdjson::padded_input` on systems without a page size of at least 4096: virtually all systems qualify except for some niche embedded systems running custom operating systems. Standard Linux, Windows, macOS, Android, iOS, etc., are all fine.  Note that, most times, an `simdjson::padded_input` instance will not copy the data and will only act
+as a view (it does not own the memory).
+
+If you have a buffer with no trailing padding at all and you want neither to add padding nor to let the library make a padded copy, see [Parsing Without Padding](#parsing-without-padding) below.
+
+
+Parsing Without Padding
+---------------------
+
+
+If you have a buffer with **no** trailing padding and you do not want the library to copy it into a padded buffer, the DOM API offers `dom::parser::parse_unpadded`:
+
+```cpp
+dom::parser parser;
+std::string_view json = get_json();          // exactly json.size() bytes, no padding
+dom::element doc = parser.parse_unpadded(json);
+```
+
+The `parse_unpadded` function parses directly from your buffer of exactly `len` bytes and is guaranteed never to read past `buf + len`. It is the zero-copy alternative to `parser.parse(buf, len, /* realloc_if_needed */ true)`, which instead allocates a padded copy of the whole input. As with `parse(buf, len, false)`, the input is read (never written) and must stay alive, together with the parser, while you use the returned document. Overloads accept `std::string_view`, `const char*`/length, and `const uint8_t*`/length, and `parse_into_document_unpadded` lets you supply your own `dom::document`.
+
+There is a performance penalty. `parse_unpadded` is slower than parsing an already-padded buffer with `parse()`. simdjson's value parsers normally read a few bytes (up to `SIMDJSON_PADDING`) past the end of each value, relying on the padding; near the end of an unpadded buffer that would read out of bounds, so `parse_unpadded` parses values in the final stretch of the buffer with extra care (it finishes the last string, and copies near-the-end numbers/atoms into a small padded scratch). On a string-heavy document such as `twitter.json` the penalty is on the order of a few percent of total parsing time. Prefer padding your input when you can; reach for `parse_unpadded` only when you genuinely cannot pad.
+
 
 Performance Tips
 ---------------------
 
-- For release builds, we recommend setting `NDEBUG` pre-processor directive when compiling the `simdjson` library. Importantly, using the optimization flags `-O2` or `-O3` under GCC and LLVM clang does not set the `NDEBUG` directrive, you must set it manually (e.g., `-DNDEBUG`).
+- For release builds, we recommend setting `NDEBUG` pre-processor directive when compiling the `simdjson` library. Importantly, using the optimization flags `-O2` or `-O3` under GCC and LLVM clang does not set the `NDEBUG` directive, you must set it manually (e.g., `-DNDEBUG`).
 - For long streams of JSON documents, consider [`iterate_many`](iterate_many.md) and [`parse_many`](parse_many.md) for better performance.

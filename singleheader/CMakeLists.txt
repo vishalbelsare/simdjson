@@ -16,10 +16,6 @@ set(SINGLEHEADER_REPO_FILES
 )
 set_source_files_properties(${SINGLEHEADER_FILES} PROPERTIES GENERATED TRUE)
 
-find_program(BASH bash)
-
-# Under Windows, exectuting a bash script works, except that you cannot generally
-# do bash C:/path to my script. You need a  "mounted" path: /mnt/c/path
 find_package(Python3 COMPONENTS Interpreter)
 
 if (Python3_Interpreter_FOUND AND (NOT WIN32))
@@ -29,7 +25,7 @@ if (Python3_Interpreter_FOUND AND (NOT WIN32))
       AMALGAMATE_SOURCE_PATH=${PROJECT_SOURCE_DIR}/src
       AMALGAMATE_INPUT_PATH=${PROJECT_SOURCE_DIR}/include
       AMALGAMATE_OUTPUT_PATH=${CMAKE_CURRENT_BINARY_DIR}
-      ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/amalgamate.py
+      ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/amalgamate.py --quiet
       #
       # This is the best way I could find to make amalgamation trigger whenever source files or
       # header files change: since the "simdjson" library has to get rebuilt when that happens, we
@@ -56,7 +52,7 @@ if (Python3_Interpreter_FOUND AND (NOT WIN32))
       # file regeneration in the source directory without the user's knowledge.
       # OUTPUT ${CMAKE_CURRENT_SOURCE_DIR}/simdjson.cpp ${CMAKE_CURRENT_SOURCE_DIR}/simdjson.h ${CMAKE_CURRENT_SOURCE_DIR}/amalgamate_demo.cpp ${CMAKE_CURRENT_SOURCE_DIR}/README.md
       COMMAND ${CMAKE_COMMAND} -E copy ${SINGLEHEADER_FILES} ${CMAKE_CURRENT_SOURCE_DIR}
-      DEPENDS ${SINGLEHEADER_FILES}
+      POST_BUILD ${SINGLEHEADER_FILES}
     )
   endif()
 
@@ -127,7 +123,10 @@ include(${PROJECT_SOURCE_DIR}/cmake/add_compile_only_test.cmake)
 # Under Windows you should not mix static and dynamic. Pick one. The following test is static.
 if(NOT SIMDJSON_LEGACY_VISUAL_STUDIO AND NOT SIMDJSON_WINDOWS_DLL)
   add_executable(amalgamate_demo $<BUILD_INTERFACE:${CMAKE_CURRENT_BINARY_DIR}/amalgamate_demo.cpp>)
-  target_link_libraries(amalgamate_demo simdjson-singleheader-include-source simdjson-internal-flags)
+  add_library(amalgamate_demo_simdjson $<BUILD_INTERFACE:${CMAKE_CURRENT_BINARY_DIR}/simdjson.cpp>)
+  target_link_libraries(amalgamate_demo amalgamate_demo_simdjson simdjson-internal-flags)
+  target_include_directories(amalgamate_demo_simdjson PUBLIC $<BUILD_INTERFACE:${CMAKE_CURRENT_BINARY_DIR}>)
+  target_include_directories(amalgamate_demo PUBLIC $<BUILD_INTERFACE:${CMAKE_CURRENT_BINARY_DIR}>)
   add_test(amalgamate_demo amalgamate_demo ${EXAMPLE_JSON} ${EXAMPLE_NDJSON})
   set_property(TEST amalgamate_demo APPEND PROPERTY LABELS per_implementation singleheader)
   add_dependencies(singleheader_tests amalgamate_demo)
@@ -168,7 +167,8 @@ if (NOT (${CMAKE_CURRENT_SOURCE_DIR} STREQUAL ${CMAKE_CURRENT_BINARY_DIR}))
   # breaks. Simply put: under Windows you should not mix static and dynamic. Pick one.
   if(NOT SIMDJSON_LEGACY_VISUAL_STUDIO AND NOT SIMDJSON_WINDOWS_DLL)
     add_executable(amalgamate_demo_direct_from_repository ${CMAKE_CURRENT_SOURCE_DIR}/amalgamate_demo.cpp)
-    target_link_libraries(amalgamate_demo_direct_from_repository simdjson-singleheader-include-source-direct-from-repository simdjson-internal-flags)
+    add_library(amalgamate_demo_direct_from_repository_simdjson ${CMAKE_CURRENT_SOURCE_DIR}/simdjson.cpp)
+    target_link_libraries(amalgamate_demo_direct_from_repository amalgamate_demo_direct_from_repository_simdjson simdjson-singleheader-include-source-direct-from-repository simdjson-internal-flags)
     add_test(amalgamate_demo_direct_from_repository amalgamate_demo_direct_from_repository ${EXAMPLE_JSON} ${EXAMPLE_NDJSON})
     set_property(TEST amalgamate_demo_direct_from_repository APPEND PROPERTY LABELS per_implementation singleheader)
     add_dependencies(singleheader_tests amalgamate_demo_direct_from_repository)

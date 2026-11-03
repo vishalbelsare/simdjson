@@ -1,5 +1,6 @@
 #include "simdjson.h"
 #include "test_ondemand.h"
+#include <limits>
 #include <string>
 
 using namespace simdjson;
@@ -66,6 +67,30 @@ namespace number_in_string_tests {
         double result;
         ASSERT_SUCCESS(doc.get_double_in_string().get(result));
         ASSERT_EQUAL(result,11232321.12);
+        TEST_SUCCEED();
+    }
+
+    bool in_document_extreme_values() {
+        TEST_START();
+        ondemand::parser parser;
+        ondemand::document doc;
+        int64_t i;
+        uint64_t u;
+        auto json = R"("-9223372036854775808")"_padded;
+        ASSERT_SUCCESS(parser.iterate(json).get(doc));
+        ASSERT_SUCCESS(doc.get_int64_in_string().get(i));
+        ASSERT_EQUAL(i, (std::numeric_limits<int64_t>::min)());
+        json = R"("-1000000000000000000")"_padded;
+        ASSERT_SUCCESS(parser.iterate(json).get(doc));
+        ASSERT_SUCCESS(doc.get_int64_in_string().get(i));
+        ASSERT_EQUAL(i, -1000000000000000000);
+        json = R"("18446744073709551615")"_padded;
+        ASSERT_SUCCESS(parser.iterate(json).get(doc));
+        ASSERT_SUCCESS(doc.get_uint64_in_string().get(u));
+        ASSERT_EQUAL(u, (std::numeric_limits<uint64_t>::max)());
+        json = R"("184467440737095516150")"_padded;
+        ASSERT_SUCCESS(parser.iterate(json).get(doc));
+        ASSERT_ERROR(doc.get_uint64_in_string().get(u), NUMBER_ERROR);
         TEST_SUCCEED();
     }
 
@@ -265,6 +290,40 @@ namespace number_in_string_tests {
         TEST_SUCCEED();
     }
 
+    // The *_in_string getters used to skip the first character without
+    // checking that it is a quote: an unquoted number, or an array that
+    // starts with digits, could be parsed or reported as NUMBER_ERROR.
+    bool not_a_string_incorrect_type() {
+        TEST_START();
+        auto json = R"( [512, -512, 5.12, [12,3], [-12,3], {"1":2}, true, null] )"_padded;
+        ondemand::parser parser;
+        ondemand::document doc;
+        ASSERT_SUCCESS(parser.iterate(json).get(doc));
+        size_t counter{0};
+        uint64_t u;
+        int64_t i;
+        double d;
+        float f;
+        for (auto value : doc) {
+            ASSERT_ERROR(value.get_uint64_in_string().get(u), INCORRECT_TYPE);
+            ASSERT_ERROR(value.get_int64_in_string().get(i), INCORRECT_TYPE);
+            ASSERT_ERROR(value.get_double_in_string().get(d), INCORRECT_TYPE);
+            ASSERT_ERROR(value.get_float_in_string().get(f), INCORRECT_TYPE);
+            counter++;
+        }
+        ASSERT_EQUAL(counter,8);
+        for (std::string_view text : {"512", "-512", "5.12"}) {
+            padded_string scalar(text);
+            ASSERT_SUCCESS(parser.iterate(scalar).get(doc));
+            ASSERT_ERROR(doc.get_uint64_in_string().get(u), INCORRECT_TYPE);
+            ASSERT_SUCCESS(parser.iterate(scalar).get(doc));
+            ASSERT_ERROR(doc.get_int64_in_string().get(i), INCORRECT_TYPE);
+            ASSERT_SUCCESS(parser.iterate(scalar).get(doc));
+            ASSERT_ERROR(doc.get_double_in_string().get(d), INCORRECT_TYPE);
+        }
+        TEST_SUCCEED();
+    }
+
     bool json_pointer_test() {
         TEST_START();
         auto json = R"( ["12.34", { "a":["3","5.6"], "b":{"c":"1.23e1"} }, ["1", "3.5"] ])"_padded;
@@ -335,7 +394,12 @@ namespace number_in_string_tests {
         double d;
         std::string_view view;
         ASSERT_SUCCESS(doc.find_field("ticker").find_field("change").get(value));
+#if SIMDJSON_ENABLE_NAN_INF
+        ASSERT_SUCCESS(value.get_double_in_string().get(d));
+        ASSERT_EQUAL(d, std::numeric_limits<double>::infinity());
+#else
         ASSERT_ERROR(value.get_double_in_string().get(d), INCORRECT_TYPE);
+#endif
         ASSERT_SUCCESS(value.get_string().get(view));
         ASSERT_EQUAL(view,"Infinity");
         TEST_SUCCEED();
@@ -348,6 +412,7 @@ namespace number_in_string_tests {
                 in_document_int64() &&
                 in_document_uint64() &&
                 in_document_double() &&
+                in_document_extreme_values() &&
                 array_double() &&
                 array_int() &&
                 array_unsigned() &&
@@ -355,6 +420,7 @@ namespace number_in_string_tests {
                 docs() &&
                 number_parsing_error() &&
                 incorrect_type_error() &&
+                not_a_string_incorrect_type() &&
                 json_pointer_test() &&
                 crypto_timestamp() &&
                 crypto_market() &&

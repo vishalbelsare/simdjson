@@ -1,11 +1,16 @@
-#ifndef SIMDJSON_INLINE_ARRAY_H
-#define SIMDJSON_INLINE_ARRAY_H
+#ifndef SIMDJSON_ARRAY_INL_H
+#define SIMDJSON_ARRAY_INL_H
 
-// Inline implementations go in here.
+#include <utility>
 
+#include "simdjson/dom/base.h"
 #include "simdjson/dom/array.h"
 #include "simdjson/dom/element.h"
-#include <utility>
+#include "simdjson/error-inl.h"
+#include "simdjson/jsonpathutil.h"
+#include "simdjson/internal/tape_ref-inl.h"
+
+#include <limits>
 
 namespace simdjson {
 
@@ -33,6 +38,14 @@ inline size_t simdjson_result<dom::array>::size() const noexcept(false) {
   if (error()) { throw simdjson_error(error()); }
   return first.size();
 }
+inline dom::array::reverse_iterator simdjson_result<dom::array>::rbegin() const noexcept(false) {
+  if (error()) { throw simdjson_error(error()); }
+  return first.rbegin();
+}
+inline dom::array::reverse_iterator simdjson_result<dom::array>::rend() const noexcept(false) {
+  if (error()) { throw simdjson_error(error()); }
+  return first.rend();
+}
 
 #endif // SIMDJSON_EXCEPTIONS
 
@@ -40,9 +53,29 @@ inline simdjson_result<dom::element> simdjson_result<dom::array>::at_pointer(std
   if (error()) { return error(); }
   return first.at_pointer(json_pointer);
 }
+
+ inline simdjson_result<dom::element> simdjson_result<dom::array>::at_path(std::string_view json_path) const noexcept {
+  if (error()) { return error(); }
+  auto json_pointer = json_path_to_pointer_conversion(json_path);
+  if (json_pointer == "-1") { return INVALID_JSON_POINTER; }
+  return at_pointer(json_pointer);
+ }
+
+inline simdjson_result<std::vector<dom::element>> simdjson_result<dom::array>::at_path_with_wildcard(std::string_view json_path) const noexcept {
+  if (error()) {
+    return error();
+  }
+  return first.at_path_with_wildcard(json_path);
+}
+
 inline simdjson_result<dom::element> simdjson_result<dom::array>::at(size_t index) const noexcept {
   if (error()) { return error(); }
   return first.at(index);
+}
+
+inline std::vector<dom::element>& simdjson_result<dom::array>::get_values(std::vector<dom::element>& out) const noexcept {
+  if (error()) { return out; }
+  return first.get_values(out);
 }
 
 namespace dom {
@@ -64,6 +97,15 @@ inline size_t array::size() const noexcept {
   SIMDJSON_DEVELOPMENT_ASSERT(tape.usable()); // https://github.com/simdjson/simdjson/issues/1914
   return tape.scope_count();
 }
+inline array::reverse_iterator array::rbegin() const noexcept {
+  SIMDJSON_DEVELOPMENT_ASSERT(tape.usable());
+  const internal::tape_ref end_tape(tape.doc, tape.matching_brace_index() - 1);
+  return reverse_iterator(internal::tape_ref(tape.doc, end_tape.before_element(tape.json_index)), tape.json_index);
+}
+inline array::reverse_iterator array::rend() const noexcept {
+  SIMDJSON_DEVELOPMENT_ASSERT(tape.usable());
+  return reverse_iterator(tape, tape.json_index);
+}
 inline size_t array::number_of_slots() const noexcept {
   SIMDJSON_DEVELOPMENT_ASSERT(tape.usable()); // https://github.com/simdjson/simdjson/issues/1914
   return tape.matching_brace_index() - tape.json_index;
@@ -80,21 +122,9 @@ inline simdjson_result<element> array::at_pointer(std::string_view json_pointer)
   // We don't support this, because we're returning a real element, not a position.
   if (json_pointer == "-") { return INDEX_OUT_OF_BOUNDS; }
 
-  // Read the array index
   size_t array_index = 0;
   size_t i;
-  for (i = 0; i < json_pointer.length() && json_pointer[i] != '/'; i++) {
-    uint8_t digit = uint8_t(json_pointer[i] - '0');
-    // Check for non-digit in array index. If it's there, we're trying to get a field in an object
-    if (digit > 9) { return INCORRECT_TYPE; }
-    array_index = array_index*10 + digit;
-  }
-
-  // 0 followed by other digits is invalid
-  if (i > 1 && json_pointer[0] == '0') { return INVALID_JSON_POINTER; } // "JSON pointer array index has other characters after 0"
-
-  // Empty string is invalid; so is a "/" with no digits before it
-  if (i == 0) { return INVALID_JSON_POINTER; } // "Empty string in JSON pointer array index"
+  SIMDJSON_TRY(internal::parse_json_pointer_array_index(json_pointer, array_index, i));
 
   // Get the child
   auto child = array(tape).at(array_index);
@@ -109,6 +139,37 @@ inline simdjson_result<element> array::at_pointer(std::string_view json_pointer)
   return child;
 }
 
+inline simdjson_result<element> array::at_path(std::string_view json_path) const noexcept {
+  auto json_pointer = json_path_to_pointer_conversion(json_path);
+  if (json_pointer == "-1") { return INVALID_JSON_POINTER; }
+  return at_pointer(json_pointer);
+}
+
+inline void array::process_json_path_of_child_elements(std::vector<element>::iterator& current, std::vector<element>::iterator& end, const std::string_view& path_suffix, std::vector<element>& accumulator) const noexcept {
+  if (current == end) {
+    return;
+  }
+
+  simdjson_result<std::vector<element>> result;
+
+
+  for (auto it = current; it != end; ++it) {
+    std::vector<element> child_result;
+    auto error = it->at_path_with_wildcard(path_suffix).get(child_result);
+    if(error) {
+      continue;
+    }
+    accumulator.insert(accumulator.end(),
+                        std::make_move_iterator(child_result.begin()),
+                        std::make_move_iterator(child_result.end()));
+  }
+}
+
+inline simdjson_result<std::vector<element>> array::at_path_with_wildcard(std::string_view json_path) const noexcept {
+  SIMDJSON_DEVELOPMENT_ASSERT(tape.usable()); // https://github.com/simdjson/simdjson/issues/1914
+  return element(*this).at_path_with_wildcard(json_path);
+}
+
 inline simdjson_result<element> array::at(size_t index) const noexcept {
   SIMDJSON_DEVELOPMENT_ASSERT(tape.usable()); // https://github.com/simdjson/simdjson/issues/1914
   size_t i=0;
@@ -117,6 +178,43 @@ inline simdjson_result<element> array::at(size_t index) const noexcept {
     i++;
   }
   return INDEX_OUT_OF_BOUNDS;
+}
+
+inline std::vector<element>& array::get_values(std::vector<element>& out) const noexcept {
+  out.reserve(this->size());
+  for (auto element : *this) {
+    out.emplace_back(element);
+  }
+
+  return out;
+}
+
+inline array::operator element() const noexcept {
+	return element(tape);
+}
+
+//
+// array::reverse_iterator inline implementation
+//
+simdjson_inline array::reverse_iterator::reverse_iterator(const internal::tape_ref &_tape, size_t _array_start) noexcept
+    : tape{_tape}, array_start{_array_start} { }
+inline element array::reverse_iterator::operator*() const noexcept {
+  return element(tape);
+}
+inline array::reverse_iterator& array::reverse_iterator::operator++() noexcept {
+  tape.json_index = tape.before_element(array_start);
+  return *this;
+}
+inline array::reverse_iterator array::reverse_iterator::operator++(int) noexcept {
+  reverse_iterator out = *this;
+  ++*this;
+  return out;
+}
+inline bool array::reverse_iterator::operator==(const reverse_iterator& other) const noexcept {
+  return tape.doc == other.tape.doc && tape.json_index == other.tape.json_index;
+}
+inline bool array::reverse_iterator::operator!=(const reverse_iterator& other) const noexcept {
+  return !(*this == other);
 }
 
 //
@@ -161,13 +259,13 @@ inline bool array::iterator::operator>(const array::iterator& other) const noexc
 
 #include "simdjson/dom/element-inl.h"
 
-#if defined(__cpp_lib_ranges)
+#if SIMDJSON_SUPPORTS_RANGES
 static_assert(std::ranges::view<simdjson::dom::array>);
 static_assert(std::ranges::sized_range<simdjson::dom::array>);
 #if SIMDJSON_EXCEPTIONS
 static_assert(std::ranges::view<simdjson::simdjson_result<simdjson::dom::array>>);
 static_assert(std::ranges::sized_range<simdjson::simdjson_result<simdjson::dom::array>>);
 #endif // SIMDJSON_EXCEPTIONS
-#endif // defined(__cpp_lib_ranges)
+#endif // SIMDJSON_SUPPORTS_RANGES
 
-#endif // SIMDJSON_INLINE_ARRAY_H
+#endif // SIMDJSON_ARRAY_INL_H

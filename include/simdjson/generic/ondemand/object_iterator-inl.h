@@ -1,3 +1,13 @@
+#ifndef SIMDJSON_GENERIC_ONDEMAND_OBJECT_ITERATOR_INL_H
+
+#ifndef SIMDJSON_CONDITIONAL_INCLUDE
+#define SIMDJSON_GENERIC_ONDEMAND_OBJECT_ITERATOR_INL_H
+#include "simdjson/generic/ondemand/base.h"
+#include "simdjson/generic/ondemand/object_iterator.h"
+#include "simdjson/generic/ondemand/field-inl.h"
+#include "simdjson/generic/ondemand/value_iterator-inl.h"
+#endif // SIMDJSON_CONDITIONAL_INCLUDE
+
 namespace simdjson {
 namespace SIMDJSON_IMPLEMENTATION {
 namespace ondemand {
@@ -10,7 +20,67 @@ simdjson_inline object_iterator::object_iterator(const value_iterator &_iter) no
   : iter{_iter}
 {}
 
+#if SIMDJSON_DEVELOPMENT_CHECKS
+simdjson_inline object_iterator::object_iterator(const value_iterator &_iter, object* _parent) noexcept
+  : parent{_parent}, iter{_iter}
+{
+  if (parent) parent->set_locked(true);
+}
+#endif
+
+#if SIMDJSON_DEVELOPMENT_CHECKS
+simdjson_inline object_iterator::~object_iterator() noexcept
+{
+  if (parent) parent->set_locked(false);
+}
+
+simdjson_inline object_iterator::object_iterator(object_iterator&& other) noexcept
+  : has_been_referenced{other.has_been_referenced},
+    parent{other.parent},
+    iter{std::move(other.iter)}
+{
+  other.parent = nullptr;
+}
+
+simdjson_inline object_iterator& object_iterator::operator=(object_iterator&& other) noexcept {
+  if (this != &other)
+  {
+    if (parent)
+      parent->set_locked(false);
+    has_been_referenced = other.has_been_referenced;
+    parent = other.parent;
+    iter = std::move(other.iter);
+
+    other.parent = nullptr;
+  }
+  return *this;
+}
+
+simdjson_inline object_iterator::object_iterator(const object_iterator& other) noexcept
+  : has_been_referenced{other.has_been_referenced},
+    parent{nullptr},
+    iter{other.iter}
+{}
+
+simdjson_inline object_iterator& object_iterator::operator=(const object_iterator& other) noexcept {
+  if (this != &other)
+  {
+    if (parent)
+      parent->set_locked(false);
+    has_been_referenced = other.has_been_referenced;
+    parent = nullptr;
+    iter = other.iter;
+  }
+  return *this;
+}
+#endif
+
 simdjson_inline simdjson_result<field> object_iterator::operator*() noexcept {
+#if SIMDJSON_DEVELOPMENT_CHECKS
+  // We must call * once per iteration.
+  SIMDJSON_ASSUME(!has_been_referenced);
+  has_been_referenced = true;
+#endif
   error_code error = iter.error();
   if (error) { iter.abandon(); return error; }
   auto result = field::start(iter);
@@ -29,6 +99,11 @@ simdjson_inline bool object_iterator::operator!=(const object_iterator &) const 
 SIMDJSON_PUSH_DISABLE_WARNINGS
 SIMDJSON_DISABLE_STRICT_OVERFLOW_WARNING
 simdjson_inline object_iterator &object_iterator::operator++() noexcept {
+#if SIMDJSON_DEVELOPMENT_CHECKS
+   // Before calling ++, we must have called *.
+   SIMDJSON_ASSUME(has_been_referenced);
+   has_been_referenced = false;
+#endif
   // TODO this is a safety rail ... users should exit loops as soon as they receive an error.
   // Nonetheless, let's see if performance is OK with this if statement--the compiler may give it to us for free.
   if (!iter.is_open()) { return *this; } // Iterator will be released if there is an error
@@ -124,3 +199,5 @@ simdjson_inline simdjson_result<SIMDJSON_IMPLEMENTATION::ondemand::object_iterat
 }
 
 } // namespace simdjson
+
+#endif // SIMDJSON_GENERIC_ONDEMAND_OBJECT_ITERATOR_INL_H

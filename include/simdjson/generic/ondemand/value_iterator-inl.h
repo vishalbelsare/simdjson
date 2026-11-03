@@ -1,6 +1,42 @@
+#ifndef SIMDJSON_GENERIC_ONDEMAND_VALUE_ITERATOR_INL_H
+
+#ifndef SIMDJSON_CONDITIONAL_INCLUDE
+#define SIMDJSON_GENERIC_ONDEMAND_VALUE_ITERATOR_INL_H
+#include "simdjson/generic/ondemand/base.h"
+#include "simdjson/generic/atomparsing.h"
+#include "simdjson/generic/numberparsing.h"
+#include "simdjson/generic/ondemand/json_iterator.h"
+#include "simdjson/generic/ondemand/value_iterator.h"
+#include "simdjson/generic/ondemand/json_type-inl.h"
+#include "simdjson/generic/ondemand/raw_json_string-inl.h"
+#endif // SIMDJSON_CONDITIONAL_INCLUDE
+
+#include <cstring> // std::memset (zeroing the root-number scratch padding)
+
 namespace simdjson {
 namespace SIMDJSON_IMPLEMENTATION {
 namespace ondemand {
+
+#ifdef SIMDJSON_EXPERIMENTAL_ALLOW_INCOMPLETE_JSON
+simdjson_inline bool raw_json_string_is_quote_terminated(const uint8_t *json, uint32_t max_len) noexcept {
+  bool escaping{false};
+  for (uint32_t i = 1; i < max_len; i++) {
+    switch (json[i]) {
+      case '"':
+        if (!escaping) { return true; }
+        escaping = false;
+        break;
+      case '\\':
+        escaping = !escaping;
+        break;
+      default:
+        escaping = false;
+        break;
+    }
+  }
+  return false;
+}
+#endif // SIMDJSON_EXPERIMENTAL_ALLOW_INCOMPLETE_JSON
 
 simdjson_inline value_iterator::value_iterator(
   json_iterator *json_iter,
@@ -23,12 +59,16 @@ simdjson_warn_unused simdjson_inline simdjson_result<bool> value_iterator::start
 simdjson_warn_unused simdjson_inline simdjson_result<bool> value_iterator::started_object() noexcept {
   assert_at_container_start();
 #if SIMDJSON_DEVELOPMENT_CHECKS
+  // The development checks record the start of every open container in a
+  // buffer of max_depth() entries: a document nested deeper than that is
+  // rejected, as the DOM parser does.
+  if (size_t(_depth) >= _json_iter->parser->max_depth()) { return report_error(DEPTH_ERROR, "Exceeded max depth!"); }
   _json_iter->set_start_position(_depth, start_position());
 #endif
   if (*_json_iter->peek() == '}') {
     logger::log_value(*_json_iter, "empty object");
     _json_iter->return_current_and_advance();
-    end_container();
+    SIMDJSON_TRY(end_container());
     return false;
   }
   return true;
@@ -81,7 +121,6 @@ simdjson_warn_unused simdjson_inline error_code value_iterator::end_container() 
 
 simdjson_warn_unused simdjson_inline simdjson_result<bool> value_iterator::has_next_field() noexcept {
   assert_at_next();
-
   // It's illegal to call this unless there are more tokens: anything that ends in } or ] is
   // obligated to verify there are more tokens if they are not the top level.
   switch (*_json_iter->return_current_and_advance()) {
@@ -124,7 +163,7 @@ simdjson_warn_unused simdjson_inline simdjson_result<bool> value_iterator::find_
   } else if (!is_open()) {
 #if SIMDJSON_DEVELOPMENT_CHECKS
     // If we're past the end of the object, we're being iterated out of order.
-    // Note: this isn't perfect detection. It's possible the user is inside some other object; if so,
+    // Note: this is not perfect detection. It's possible the user is inside some other object; if so,
     // this object iterator will blithely scan that object for fields.
     if (_json_iter->depth() < depth() - 1) { return OUT_OF_ORDER_ITERATION; }
 #endif
@@ -236,7 +275,7 @@ simdjson_warn_unused simdjson_inline simdjson_result<bool> value_iterator::find_
 
 #if SIMDJSON_DEVELOPMENT_CHECKS
     // If we're past the end of the object, we're being iterated out of order.
-    // Note: this isn't perfect detection. It's possible the user is inside some other object; if so,
+    // Note: this is not perfect detection. It's possible the user is inside some other object; if so,
     // this object iterator will blithely scan that object for fields.
     if (_json_iter->depth() < depth() - 1) { return OUT_OF_ORDER_ITERATION; }
 #endif
@@ -390,6 +429,22 @@ simdjson_warn_unused simdjson_inline simdjson_result<raw_json_string> value_iter
   return raw_json_string(key);
 }
 
+simdjson_warn_unused simdjson_inline error_code value_iterator::field_key_with_length(raw_json_string &key, std::size_t &len) noexcept {
+  assert_at_next();
+
+  const uint8_t *k = _json_iter->return_current_and_advance();
+  if (*(k++) != '"') { return report_error(TAPE_ERROR, "Object key is not a string"); }
+  // After return_current_and_advance(), the current token is the ':' that follows
+  // the key. The closing quote sits just before it (only JSON whitespace may
+  // intervene), so step back from the ':' to the closing quote to get the length.
+  // In minified JSON this is a single back-step.
+  const char *q = reinterpret_cast<const char *>(_json_iter->peek());
+  do { --q; } while (*q != '"');
+  key = raw_json_string(k);
+  len = static_cast<std::size_t>(q - reinterpret_cast<const char *>(k));
+  return SUCCESS;
+}
+
 simdjson_warn_unused simdjson_inline error_code value_iterator::field_value() noexcept {
   assert_at_next();
 
@@ -417,6 +472,10 @@ inline std::string value_iterator::to_string() const noexcept {
 
 simdjson_warn_unused simdjson_inline simdjson_result<bool> value_iterator::started_array() noexcept {
   assert_at_container_start();
+#if SIMDJSON_DEVELOPMENT_CHECKS
+  // See started_object().
+  if (size_t(_depth) >= _json_iter->parser->max_depth()) { return report_error(DEPTH_ERROR, "Exceeded max depth!"); }
+#endif
   if (*_json_iter->peek() == ']') {
     logger::log_value(*_json_iter, "empty array");
     _json_iter->return_current_and_advance();
@@ -500,12 +559,33 @@ simdjson_warn_unused simdjson_inline simdjson_result<bool> value_iterator::parse
 simdjson_warn_unused simdjson_inline simdjson_result<std::string_view> value_iterator::get_string(bool allow_replacement) noexcept {
   return get_raw_json_string().unescape(json_iter(), allow_replacement);
 }
+template <typename string_type>
+simdjson_warn_unused simdjson_inline error_code value_iterator::get_string(string_type& receiver, bool allow_replacement) noexcept {
+  std::string_view content;
+  // Save the string buffer location so that we can restore it after get_string
+  auto saved_string_buf_loc = _json_iter->string_buf_loc();
+  auto err = get_string(allow_replacement).get(content);
+  if (err) { return err; }
+  internal::assign_utf8(receiver, content);
+  // Restore the string buffer location, effectively discarding any temporary string storage
+  _json_iter->string_buf_loc() = saved_string_buf_loc;
+  return SUCCESS;
+}
 simdjson_warn_unused simdjson_inline simdjson_result<std::string_view> value_iterator::get_wobbly_string() noexcept {
   return get_raw_json_string().unescape_wobbly(json_iter());
 }
 simdjson_warn_unused simdjson_inline simdjson_result<raw_json_string> value_iterator::get_raw_json_string() noexcept {
   auto json = peek_scalar("string");
   if (*json != '"') { return incorrect_type_error("Not a string"); }
+#ifdef SIMDJSON_EXPERIMENTAL_ALLOW_INCOMPLETE_JSON
+  if (_json_iter->allow_incomplete_json()) {
+    const size_t remaining_input_length = _json_iter->remaining_input_length(json);
+    const uint32_t max_len = remaining_input_length < peek_start_length() ? uint32_t(remaining_input_length) : peek_start_length();
+    if (!raw_json_string_is_quote_terminated(json, max_len)) {
+      return STRING_ERROR;
+    }
+  }
+#endif // SIMDJSON_EXPERIMENTAL_ALLOW_INCOMPLETE_JSON
   advance_scalar("string");
   return raw_json_string(json+1);
 }
@@ -539,6 +619,16 @@ simdjson_warn_unused simdjson_inline simdjson_result<double> value_iterator::get
   if(result.error() == SUCCESS) { advance_non_root_scalar("double"); }
   return result;
 }
+simdjson_warn_unused simdjson_inline simdjson_result<float> value_iterator::get_float() noexcept {
+  auto result = numberparsing::parse_float(peek_non_root_scalar("float"));
+  if(result.error() == SUCCESS) { advance_non_root_scalar("float"); }
+  return result;
+}
+simdjson_warn_unused simdjson_inline simdjson_result<float> value_iterator::get_float_in_string() noexcept {
+  auto result = numberparsing::parse_float_in_string(peek_non_root_scalar("float"));
+  if(result.error() == SUCCESS) { advance_non_root_scalar("float"); }
+  return result;
+}
 simdjson_warn_unused simdjson_inline simdjson_result<bool> value_iterator::get_bool() noexcept {
   auto result = parse_bool(peek_non_root_scalar("bool"));
   if(result.error() == SUCCESS) { advance_non_root_scalar("bool"); }
@@ -570,9 +660,10 @@ simdjson_inline simdjson_result<number> value_iterator::get_number() noexcept {
 }
 
 simdjson_inline simdjson_result<bool> value_iterator::is_root_integer(bool check_trailing) noexcept {
-  auto max_len = peek_start_length();
+  auto max_len = peek_root_length();
   auto json = peek_root_scalar("is_root_integer");
-  uint8_t tmpbuf[20+1]; // <20 digits> is the longest possible unsigned integer
+  uint8_t tmpbuf[20+1+1]{}; // <20 digits> is the longest possible unsigned integer
+  tmpbuf[20+1] = '\0'; // make sure that buffer is always null terminated.
   if (!_json_iter->copy_to_buffer(json, max_len, tmpbuf, 20+1)) {
     return false; // if there are more than 20 characters, it cannot be represented as an integer.
   }
@@ -584,15 +675,23 @@ simdjson_inline simdjson_result<bool> value_iterator::is_root_integer(bool check
   return answer;
 }
 
-simdjson_inline simdjson_result<SIMDJSON_IMPLEMENTATION::numberparsing::number_type> value_iterator::get_root_number_type(bool check_trailing) noexcept {
-  auto max_len = peek_start_length();
+simdjson_inline simdjson_result<SIMDJSON_IMPLEMENTATION::number_type> value_iterator::get_root_number_type(bool check_trailing) noexcept {
+  auto max_len = peek_root_length();
   auto json = peek_root_scalar("number");
   // Per https://www.exploringbinary.com/maximum-number-of-decimal-digits-in-binary-floating-point-numbers/,
   // 1074 is the maximum number of significant fractional digits. Add 8 more digits for the biggest
   // number: -0.<fraction>e-308.
-  uint8_t tmpbuf[1074+8+1];
+  // +SIMDJSON_PADDING: the digit scan reads up to 7 bytes past the terminator.
+  uint8_t tmpbuf[1074+8+1+1+SIMDJSON_PADDING];
+  // Null terminate, and zero the padding as allocate_padded_buffer does.
+  std::memset(tmpbuf+1074+8+1, 0, 1+SIMDJSON_PADDING);
   if (!_json_iter->copy_to_buffer(json, max_len, tmpbuf, 1074+8+1)) {
-    logger::log_error(*_json_iter, start_position(), depth(), "Root number more than 1082 characters");
+    if(numberparsing::check_if_integer(json, max_len)) {
+      if (check_trailing && !_json_iter->is_single_token()) { return TRAILING_CONTENT; }
+      logger::log_error(*_json_iter, start_position(), depth(), "Found big integer");
+      return number_type::big_integer;
+    }
+    logger::log_error(*_json_iter, start_position(), depth(), "Root number more than 1082 characters and not a big integer");
     return NUMBER_ERROR;
   }
   auto answer = numberparsing::get_number_type(tmpbuf);
@@ -600,14 +699,23 @@ simdjson_inline simdjson_result<SIMDJSON_IMPLEMENTATION::numberparsing::number_t
   return answer;
 }
 simdjson_inline simdjson_result<number> value_iterator::get_root_number(bool check_trailing) noexcept {
-  auto max_len = peek_start_length();
+  auto max_len = peek_root_length();
   auto json = peek_root_scalar("number");
   // Per https://www.exploringbinary.com/maximum-number-of-decimal-digits-in-binary-floating-point-numbers/,
   // 1074 is the maximum number of significant fractional digits. Add 8 more digits for the biggest
   // number: -0.<fraction>e-308.
-  uint8_t tmpbuf[1074+8+1];
+  // NOTE: the current approach doesn't work for very big integer numbers containing more than 1074 digits.
+  // +SIMDJSON_PADDING: the digit scan reads up to 7 bytes past the terminator.
+  uint8_t tmpbuf[1074+8+1+1+SIMDJSON_PADDING];
+  // Null terminate, and zero the padding as allocate_padded_buffer does.
+  std::memset(tmpbuf+1074+8+1, 0, 1+SIMDJSON_PADDING);
   if (!_json_iter->copy_to_buffer(json, max_len, tmpbuf, 1074+8+1)) {
-    logger::log_error(*_json_iter, start_position(), depth(), "Root number more than 1082 characters");
+    if(numberparsing::check_if_integer(json, max_len)) {
+      if (check_trailing && !_json_iter->is_single_token()) { return TRAILING_CONTENT; }
+      logger::log_error(*_json_iter, start_position(), depth(), "Found big integer");
+      return BIGINT_ERROR;
+    }
+    logger::log_error(*_json_iter, start_position(), depth(), "Root number more than 1082 characters and not a big integer");
     return NUMBER_ERROR;
   }
   number num;
@@ -620,6 +728,18 @@ simdjson_inline simdjson_result<number> value_iterator::get_root_number(bool che
 simdjson_warn_unused simdjson_inline simdjson_result<std::string_view> value_iterator::get_root_string(bool check_trailing, bool allow_replacement) noexcept {
   return get_root_raw_json_string(check_trailing).unescape(json_iter(), allow_replacement);
 }
+template <typename string_type>
+simdjson_warn_unused simdjson_inline error_code value_iterator::get_root_string(string_type& receiver, bool check_trailing, bool allow_replacement) noexcept {
+  std::string_view content;
+  // Save the string buffer location so that we can restore it after get_string
+  auto saved_string_buf_loc = _json_iter->string_buf_loc();
+  auto err = get_root_string(check_trailing, allow_replacement).get(content);
+  if (err) { return err; }
+  internal::assign_utf8(receiver, content);
+  // Restore the string buffer location, effectively discarding any temporary string storage
+  _json_iter->string_buf_loc() = saved_string_buf_loc;
+  return SUCCESS;
+}
 simdjson_warn_unused simdjson_inline simdjson_result<std::string_view> value_iterator::get_root_wobbly_string(bool check_trailing) noexcept {
   return get_root_raw_json_string(check_trailing).unescape_wobbly(json_iter());
 }
@@ -627,13 +747,23 @@ simdjson_warn_unused simdjson_inline simdjson_result<raw_json_string> value_iter
   auto json = peek_scalar("string");
   if (*json != '"') { return incorrect_type_error("Not a string"); }
   if (check_trailing && !_json_iter->is_single_token()) { return TRAILING_CONTENT; }
+#ifdef SIMDJSON_EXPERIMENTAL_ALLOW_INCOMPLETE_JSON
+  if (_json_iter->allow_incomplete_json()) {
+    const size_t remaining_input_length = _json_iter->remaining_input_length(json);
+    const uint32_t max_len = remaining_input_length < peek_root_length() ? uint32_t(remaining_input_length) : peek_root_length();
+    if (!raw_json_string_is_quote_terminated(json, max_len)) {
+      return STRING_ERROR;
+    }
+  }
+#endif // SIMDJSON_EXPERIMENTAL_ALLOW_INCOMPLETE_JSON
   advance_scalar("string");
   return raw_json_string(json+1);
 }
 simdjson_warn_unused simdjson_inline simdjson_result<uint64_t> value_iterator::get_root_uint64(bool check_trailing) noexcept {
-  auto max_len = peek_start_length();
+  auto max_len = peek_root_length();
   auto json = peek_root_scalar("uint64");
-  uint8_t tmpbuf[20+1]; // <20 digits> is the longest possible unsigned integer
+  uint8_t tmpbuf[20+1+1]{}; // <20 digits> is the longest possible unsigned integer
+  tmpbuf[20+1] = '\0'; // make sure that buffer is always null terminated.
   if (!_json_iter->copy_to_buffer(json, max_len, tmpbuf, 20+1)) {
     logger::log_error(*_json_iter, start_position(), depth(), "Root number more than 20 characters");
     return NUMBER_ERROR;
@@ -646,11 +776,12 @@ simdjson_warn_unused simdjson_inline simdjson_result<uint64_t> value_iterator::g
   return result;
 }
 simdjson_warn_unused simdjson_inline simdjson_result<uint64_t> value_iterator::get_root_uint64_in_string(bool check_trailing) noexcept {
-  auto max_len = peek_start_length();
+  auto max_len = peek_root_length();
   auto json = peek_root_scalar("uint64");
-  uint8_t tmpbuf[20+1]; // <20 digits> is the longest possible unsigned integer
-  if (!_json_iter->copy_to_buffer(json, max_len, tmpbuf, 20+1)) {
-    logger::log_error(*_json_iter, start_position(), depth(), "Root number more than 20 characters");
+  uint8_t tmpbuf[20+2+1]{}; // "<20 digits>" is the longest possible unsigned integer
+  tmpbuf[20+2] = '\0'; // make sure that buffer is always null terminated.
+  if (!_json_iter->copy_to_buffer(json, max_len, tmpbuf, 20+2)) {
+    logger::log_error(*_json_iter, start_position(), depth(), "Root number more than 22 characters");
     return NUMBER_ERROR;
   }
   auto result = numberparsing::parse_unsigned_in_string(tmpbuf);
@@ -661,9 +792,10 @@ simdjson_warn_unused simdjson_inline simdjson_result<uint64_t> value_iterator::g
   return result;
 }
 simdjson_warn_unused simdjson_inline simdjson_result<int64_t> value_iterator::get_root_int64(bool check_trailing) noexcept {
-  auto max_len = peek_start_length();
+  auto max_len = peek_root_length();
   auto json = peek_root_scalar("int64");
-  uint8_t tmpbuf[20+1]; // -<19 digits> is the longest possible integer
+  uint8_t tmpbuf[20+1+1]; // -<19 digits> is the longest possible integer
+  tmpbuf[20+1] = '\0'; // make sure that buffer is always null terminated.
   if (!_json_iter->copy_to_buffer(json, max_len, tmpbuf, 20+1)) {
     logger::log_error(*_json_iter, start_position(), depth(), "Root number more than 20 characters");
     return NUMBER_ERROR;
@@ -677,11 +809,12 @@ simdjson_warn_unused simdjson_inline simdjson_result<int64_t> value_iterator::ge
   return result;
 }
 simdjson_warn_unused simdjson_inline simdjson_result<int64_t> value_iterator::get_root_int64_in_string(bool check_trailing) noexcept {
-  auto max_len = peek_start_length();
+  auto max_len = peek_root_length();
   auto json = peek_root_scalar("int64");
-  uint8_t tmpbuf[20+1]; // -<19 digits> is the longest possible integer
-  if (!_json_iter->copy_to_buffer(json, max_len, tmpbuf, 20+1)) {
-    logger::log_error(*_json_iter, start_position(), depth(), "Root number more than 20 characters");
+  uint8_t tmpbuf[20+2+1]; // "-<19 digits>" is the longest possible integer
+  tmpbuf[20+2] = '\0'; // make sure that buffer is always null terminated.
+  if (!_json_iter->copy_to_buffer(json, max_len, tmpbuf, 20+2)) {
+    logger::log_error(*_json_iter, start_position(), depth(), "Root number more than 22 characters");
     return NUMBER_ERROR;
   }
 
@@ -693,12 +826,15 @@ simdjson_warn_unused simdjson_inline simdjson_result<int64_t> value_iterator::ge
   return result;
 }
 simdjson_warn_unused simdjson_inline simdjson_result<double> value_iterator::get_root_double(bool check_trailing) noexcept {
-  auto max_len = peek_start_length();
+  auto max_len = peek_root_length();
   auto json = peek_root_scalar("double");
   // Per https://www.exploringbinary.com/maximum-number-of-decimal-digits-in-binary-floating-point-numbers/,
   // 1074 is the maximum number of significant fractional digits. Add 8 more digits for the biggest
   // number: -0.<fraction>e-308.
-  uint8_t tmpbuf[1074+8+1];
+  // +SIMDJSON_PADDING: the digit scan reads up to 7 bytes past the terminator.
+  uint8_t tmpbuf[1074+8+1+1+SIMDJSON_PADDING]; // +1 for null termination.
+  // Null terminate, and zero the padding as allocate_padded_buffer does.
+  std::memset(tmpbuf+1074+8+1, 0, 1+SIMDJSON_PADDING);
   if (!_json_iter->copy_to_buffer(json, max_len, tmpbuf, 1074+8+1)) {
     logger::log_error(*_json_iter, start_position(), depth(), "Root number more than 1082 characters");
     return NUMBER_ERROR;
@@ -712,12 +848,15 @@ simdjson_warn_unused simdjson_inline simdjson_result<double> value_iterator::get
 }
 
 simdjson_warn_unused simdjson_inline simdjson_result<double> value_iterator::get_root_double_in_string(bool check_trailing) noexcept {
-  auto max_len = peek_start_length();
+  auto max_len = peek_root_length();
   auto json = peek_root_scalar("double");
   // Per https://www.exploringbinary.com/maximum-number-of-decimal-digits-in-binary-floating-point-numbers/,
   // 1074 is the maximum number of significant fractional digits. Add 8 more digits for the biggest
   // number: -0.<fraction>e-308.
-  uint8_t tmpbuf[1074+8+1];
+  // +SIMDJSON_PADDING: the digit scan reads up to 7 bytes past the terminator.
+  uint8_t tmpbuf[1074+8+1+1+SIMDJSON_PADDING]; // +1 for null termination.
+  // Null terminate, and zero the padding as allocate_padded_buffer does.
+  std::memset(tmpbuf+1074+8+1, 0, 1+SIMDJSON_PADDING);
   if (!_json_iter->copy_to_buffer(json, max_len, tmpbuf, 1074+8+1)) {
     logger::log_error(*_json_iter, start_position(), depth(), "Root number more than 1082 characters");
     return NUMBER_ERROR;
@@ -729,26 +868,74 @@ simdjson_warn_unused simdjson_inline simdjson_result<double> value_iterator::get
   }
   return result;
 }
-simdjson_warn_unused simdjson_inline simdjson_result<bool> value_iterator::get_root_bool(bool check_trailing) noexcept {
-  auto max_len = peek_start_length();
-  auto json = peek_root_scalar("bool");
-  uint8_t tmpbuf[5+1];
-  if (!_json_iter->copy_to_buffer(json, max_len, tmpbuf, 5+1)) { return incorrect_type_error("Not a boolean"); }
-  auto result = parse_bool(tmpbuf);
+
+simdjson_warn_unused simdjson_inline simdjson_result<float> value_iterator::get_root_float(bool check_trailing) noexcept {
+  auto max_len = peek_root_length();
+  auto json = peek_root_scalar("float");
+  // We use the same buffer size as get_root_double: the number of significant
+  // digits that matter is smaller for binary32, but the JSON document may still
+  // spell out a long number that we must parse (and round) faithfully.
+  // +SIMDJSON_PADDING: the digit scan reads up to 7 bytes past the terminator.
+  uint8_t tmpbuf[1074+8+1+1+SIMDJSON_PADDING]; // +1 for null termination.
+  // Null terminate, and zero the padding as allocate_padded_buffer does.
+  std::memset(tmpbuf+1074+8+1, 0, 1+SIMDJSON_PADDING);
+  if (!_json_iter->copy_to_buffer(json, max_len, tmpbuf, 1074+8+1)) {
+    logger::log_error(*_json_iter, start_position(), depth(), "Root number more than 1082 characters");
+    return NUMBER_ERROR;
+  }
+  auto result = numberparsing::parse_float(tmpbuf);
   if(result.error() == SUCCESS) {
     if (check_trailing && !_json_iter->is_single_token()) { return TRAILING_CONTENT; }
-    advance_root_scalar("bool");
+    advance_root_scalar("float");
   }
   return result;
 }
+
+simdjson_warn_unused simdjson_inline simdjson_result<float> value_iterator::get_root_float_in_string(bool check_trailing) noexcept {
+  auto max_len = peek_root_length();
+  auto json = peek_root_scalar("float");
+  // +SIMDJSON_PADDING: the digit scan reads up to 7 bytes past the terminator.
+  uint8_t tmpbuf[1074+8+1+1+SIMDJSON_PADDING]; // +1 for null termination.
+  // Null terminate, and zero the padding as allocate_padded_buffer does.
+  std::memset(tmpbuf+1074+8+1, 0, 1+SIMDJSON_PADDING);
+  if (!_json_iter->copy_to_buffer(json, max_len, tmpbuf, 1074+8+1)) {
+    logger::log_error(*_json_iter, start_position(), depth(), "Root number more than 1082 characters");
+    return NUMBER_ERROR;
+  }
+  auto result = numberparsing::parse_float_in_string(tmpbuf);
+  if(result.error() == SUCCESS) {
+    if (check_trailing && !_json_iter->is_single_token()) { return TRAILING_CONTENT; }
+    advance_root_scalar("float");
+  }
+  return result;
+}
+
+simdjson_warn_unused simdjson_inline simdjson_result<bool> value_iterator::get_root_bool(bool check_trailing) noexcept {
+  auto max_len = peek_root_length();
+  auto json = peek_root_scalar("bool");
+  // We have a boolean if we have either "true" or "false" and the next character is either
+  // a structural character or whitespace. We also check that the length is correct:
+  // "true" and "false" are 4 and 5 characters long, respectively.
+  bool value_true = (max_len >= 4 && !atomparsing::str4ncmp(json, "true") &&
+  (max_len == 4 || jsoncharutils::is_structural_or_whitespace(json[4])));
+  bool value_false = (max_len >= 5 && !atomparsing::str4ncmp(json, "fals") && json[4] == 'e' &&
+  (max_len == 5 || jsoncharutils::is_structural_or_whitespace(json[5])));
+  if(value_true == false && value_false == false) { return incorrect_type_error("Not a boolean"); }
+  if (check_trailing && !_json_iter->is_single_token()) { return TRAILING_CONTENT; }
+  advance_root_scalar("bool");
+  return value_true;
+}
+
 simdjson_inline simdjson_result<bool> value_iterator::is_root_null(bool check_trailing) noexcept {
-  auto max_len = peek_start_length();
+  auto max_len = peek_root_length();
   auto json = peek_root_scalar("null");
   bool result = (max_len >= 4 && !atomparsing::str4ncmp(json, "null") &&
          (max_len == 4 || jsoncharutils::is_structural_or_whitespace(json[4])));
   if(result) { // we have something that looks like a null.
     if (check_trailing && !_json_iter->is_single_token()) { return TRAILING_CONTENT; }
     advance_root_scalar("null");
+  } else if (json[0] == 'n') {
+    return incorrect_type_error("Not a null but starts with n");
   }
   return result;
 }
@@ -814,6 +1001,9 @@ simdjson_inline const uint8_t *value_iterator::peek_start() const noexcept {
 simdjson_inline uint32_t value_iterator::peek_start_length() const noexcept {
   return _json_iter->peek_length(start_position());
 }
+simdjson_inline uint32_t value_iterator::peek_root_length() const noexcept {
+  return _json_iter->peek_root_length(start_position());
+}
 
 simdjson_inline const uint8_t *value_iterator::peek_scalar(const char *type) noexcept {
   logger::log_value(*_json_iter, start_position(), depth(), type);
@@ -836,7 +1026,7 @@ simdjson_inline void value_iterator::advance_scalar(const char *type) noexcept {
   _json_iter->ascend_to(depth()-1);
 }
 
-simdjson_inline error_code value_iterator::start_container(uint8_t start_char, const char *incorrect_type_message, const char *type) noexcept {
+simdjson_warn_unused simdjson_inline error_code value_iterator::start_container(uint8_t start_char, const char *incorrect_type_message, const char *type) noexcept {
   logger::log_start_value(*_json_iter, start_position(), depth(), type);
   // If we're not at the position anymore, we don't want to advance the cursor.
   const uint8_t *json;
@@ -908,6 +1098,9 @@ simdjson_inline bool value_iterator::is_at_key() const noexcept {
   // Keys are at the same depth as the object.
   // Note here that we could be safer and check that we are within an object,
   // but we do not.
+  //
+  // As long as we are at the object's depth, in a valid document,
+  // we will only ever be at { , : or the actual string key: ".
   return _depth == _json_iter->_depth && *_json_iter->peek() == '"';
 }
 
@@ -945,6 +1138,21 @@ simdjson_inline void value_iterator::move_at_container_start() noexcept {
   _json_iter->token.set_position(_start_position + 1);
 }
 
+simdjson_inline void value_iterator::reenter_at(token_position position, depth_t depth) noexcept {
+  // Unlike reenter_child(), this does not require the live depth to be
+  // exactly one level shallower than depth, nor does it validate against
+  // the parser's per-depth container-start bookkeeping: neither holds in
+  // general for a caller-supplied snapshot (see object_position). What
+  // must still always hold, regardless of what was captured or how far
+  // the live iterator has since moved, is that position and depth are
+  // themselves sane values -- this is the same bound reenter_child()
+  // itself applies unconditionally.
+  SIMDJSON_ASSUME(position != nullptr);
+  SIMDJSON_ASSUME(depth >= 1 && depth < INT32_MAX);
+  _json_iter->_depth = depth;
+  _json_iter->token.set_position(position);
+}
+
 simdjson_inline simdjson_result<bool> value_iterator::reset_array() noexcept {
   if(error()) { return error(); }
   move_at_container_start();
@@ -970,7 +1178,12 @@ inline void value_iterator::assert_at_root() const noexcept {
 
 inline void value_iterator::assert_at_non_root_start() const noexcept {
   assert_at_start();
-  SIMDJSON_ASSUME( _depth > 1 );
+  // The value is usually inside an array or object (depth > 1), but a root
+  // array or object obtained with document::get_value() is a value at depth 1.
+  // Scalar getters may be called on it: they see the leading '[' or '{' and
+  // fail (INCORRECT_TYPE, or NUMBER_ERROR for get_number() and friends)
+  // without advancing the iterator.
+  SIMDJSON_ASSUME( _depth > 0 );
 }
 
 inline void value_iterator::assert_is_valid() const noexcept {
@@ -998,7 +1211,7 @@ simdjson_inline simdjson_result<json_type> value_iterator::type() const noexcept
     case '5': case '6': case '7': case '8': case '9':
       return json_type::number;
     default:
-      return TAPE_ERROR;
+      return json_type::unknown;
   }
 }
 
@@ -1034,3 +1247,5 @@ simdjson_inline simdjson_result<SIMDJSON_IMPLEMENTATION::ondemand::value_iterato
     : implementation_simdjson_result_base<SIMDJSON_IMPLEMENTATION::ondemand::value_iterator>(error) {}
 
 } // namespace simdjson
+
+#endif // SIMDJSON_GENERIC_ONDEMAND_VALUE_ITERATOR_INL_H

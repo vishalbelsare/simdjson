@@ -4,9 +4,9 @@ Performance Notes
 simdjson strives to be at its fastest *without tuning*, and generally achieves this. However, there
 are still some scenarios where tuning can enhance performance.
 Once your code is tested, we
-further encourage you to define `NDEBUG` in your Release builds to disable additional runtime
+further encourage you to define `NDEBUG` in your release builds to disable additional runtime
 testing and get the best performance.
-* [NDEBUG directive](#ndebug-directive)
+* [NDEBUG macro](#ndebug-macro)
 * [Reusing the parser for maximum efficiency](#reusing-the-parser-for-maximum-efficiency)
 * [Reusing string buffers](#reusing-string-buffers)
 * [Server Loops: Long-Running Processes and Memory Capacity](#server-loops-long-running-processes-and-memory-capacity)
@@ -14,18 +14,30 @@ testing and get the best performance.
 * [Number parsing](#number-parsing)
 * [Visual Studio](#visual-studio)
 * [Power Usage and Downclocking](#power-usage-and-downclocking)
+* [Free Padding](#free-padding)
 
 
-NDEBUG directive
+NDEBUG macro
 -------------
 
-In C/C++, the `NDEBUG` pre-processor directive is not set by default. When it is not set, the simdjson library does
-many additional checks that may impact negatively the performance. We recommend that, once your code
-is well tested, you define `NDEBUG` directive in your Release builds. The `NDEBUG` directive should be defined
-prior to including the `simdjson.h` header.
+We recommend that you set `NDEBUG` macro in your release builds.
 
-The `NDEBUG` directive is generally independent from optimization flags. For example, setting `-O3` under
-GCC does not set the `NDEBUG` directive.
+In C/C++, the `NDEBUG` macro is not set by default.
+When it is not set, the software may do many additional checks that may impact
+negatively the performance. We recommend that, once your code
+is well tested, you define `NDEBUG` directive in your release builds.
+
+The `NDEBUG` directive is generally independent from optimization flags.
+For example, setting `-O3` under GCC does not set the `NDEBUG` directive.
+However, tools like `CMake` automatically
+set `NDEBUG` for release builds.
+
+In the simdjson library, we check the `NDEBUG` macro as well as other
+macros to make performant release builds. However, the C++ standard
+does not provide a definitive approach to determine whether you are
+compiling for a release build. Thus we recommend that you follow
+the practice of setting the `NDEBUG` macro in release mode to make sure
+that you do not get undesirable expensive checks.
 
 Reusing the parser for maximum efficiency
 -----------------------------------------
@@ -35,7 +47,7 @@ and reuse it. The simdjson library will allocate and retain internal buffers bet
 buffers hot in cache and keeping memory allocation and initialization to a minimum. In this manner,
 you can parse terabytes of JSON data without doing any new allocation.
 
-```c++
+```cpp
 ondemand::parser parser;
 
 // This initializes buffers  big enough to handle this JSON.
@@ -59,14 +71,14 @@ Reusing string buffers
 
 We recommend against creating many `std::string` or `simdjson::padded_string` instances to store the JSON content in your application. [Creating many non-trivial objects is convenient but often surprisingly slow](https://lemire.me/blog/2020/08/08/performance-tip-constructing-many-non-trivial-objects-is-slow/). Instead, as much as possible, you should allocate (once or a few times) reusable memory buffers where you write your JSON content. If you have a buffer `json_str` (of type `char*`) allocated for  `capacity` bytes and you store a JSON document spanning `length` bytes, you can pass it to simdjson as follows:
 
-```c++
+```cpp
  auto doc = parser.iterate(padded_string_view(json_str, length, capacity));
 ```
 
 or simply
 
 
-```c++
+```cpp
  auto doc = parser.iterate(json_str, length, capacity);
 ```
 
@@ -74,10 +86,10 @@ or simply
 Server Loops: Long-Running Processes and Memory Capacity
 ---------------------------------
 
-The On Demand approach also automatically expands its memory capacity when larger documents are parsed. However, for longer processes where very large files are processed (such as server loops), this capacity is not resized down. On Demand also lets you adjust the maximal capacity that the parser can process:
+The On-Demand approach also automatically expands its memory capacity when larger documents are parsed. However, for longer processes where very large files are processed (such as server loops), this capacity is not resized down. On-Demand also lets you adjust the maximal capacity that the parser can process:
 
 * You can set an upper bound (*max_capacity*) when construction the parser:
-```C++
+```cpp
     ondemand::parser parser(1000*1000);  // Never grows past documents > 1 MB
     auto doc = parser.iterate(json);
     for (web_request request : listen()) {
@@ -93,7 +105,7 @@ The On Demand approach also automatically expands its memory capacity when large
 The capacity will grow as the parser encounters larger documents up to 1 MB.
 
 * You can also allocate a *fixed capacity* that will never grow:
-```C++
+```cpp
     ondemand::parser parser(1000*1000);
     parser.allocate(1000*1000)  // Fix the capacity to 1 MB
     auto doc = parser.iterate(json);
@@ -157,9 +169,23 @@ On Intel and AMD Windows platforms, Microsoft Visual Studio enables programmers 
 
 When compiling with Visual Studio, we recommend the flags `/Ob2 /O2` or better. We do not recommend that you compile simdjson with architecture-specific flags such as  `arch:AVX2`. The simdjson library automatically selects the best execution kernel at runtime.
 
-Recent versions of Microsoft Visual Studio on Windows provides support for the LLVM Clang compiler. You  only need to install the "Clang compiler" optional component (ClangCL). You may also get a copy of the 64-bit LLVM CLang compiler for [Windows directly from LLVM](https://releases.llvm.org/download.html). The simdjson library fully supports the LLVM Clang compiler under Windows. In fact, you may get better performance out of simdjson with the LLVM Clang compiler than with the regular Visual Studio compiler. Meanwhile the [LLVM CLang compiler is binary compatible with Visual Studio](https://clang.llvm.org/docs/MSVCCompatibility.html) which means that you can combine their binaries (executables and libraries).
+Recent versions of Microsoft Visual Studio on Windows provides support for the LLVM Clang compiler. You  only need to install the "Clang compiler" optional component (clang-cl). You may also get a copy of the 64-bit LLVM CLang compiler for [Windows directly from LLVM](https://releases.llvm.org/download.html). The simdjson library fully supports the LLVM Clang compiler under Windows. In fact, you may get better performance out of simdjson with the LLVM Clang compiler than with the regular Visual Studio compiler. Meanwhile the [LLVM CLang compiler is binary compatible with Visual Studio](https://clang.llvm.org/docs/MSVCCompatibility.html) which means that you can combine their binaries (executables and libraries).
 
-Under Windows, we also support the GNU GCC compiler via MSYS2. The performance of 64-bit MSYS2 under Windows excellent (on par with Linux).
+We recommend Visual Studio users prefer LLVM (clang-cl). It compiles to faster release binaries. Furthermore, it compilers faster in release mode.
+
+### Strict aliasing
+
+Neither the Visual Studio compiler nor LLVM Clang targeting Visual Studio (clang-cl) relies on the C++ aliasing rules ("strict aliasing") by default. After storing an integer through a pointer, the compiler must then assume that any other value in memory may have changed, including the pointers held in simdjson's parser state, and it reloads them. The Visual Studio compiler has no option to change this behavior. With clang-cl, you can enable strict aliasing with the flag `/clang:-fstrict-aliasing` (or `-fstrict-aliasing` if you invoke `clang` with an MSVC target). With CMake:
+
+```cmake
+if(MSVC AND CMAKE_CXX_COMPILER_ID STREQUAL "Clang")
+  add_compile_options(/clang:-fstrict-aliasing)
+endif()
+```
+
+Much of simdjson is inlined into your own code, so the flag should apply to your code as well as to the simdjson library. The simdjson library is routinely built and tested with strict aliasing (it is the default with GCC and LLVM Clang on Linux and macOS), but you should only enable it if your own code respects the aliasing rules.
+
+You get the same behavior on other systems if you build with `-fno-strict-aliasing`. In our tests (GCC 16 and LLVM Clang 21, Intel Emerald Rapids), `-fno-strict-aliasing` did not measurably affect DOM parsing, but it slowed down some On-Demand workloads by up to 9% (e.g., JSON Pointer queries with `at_pointer`).
 
 
 Power Usage and Downclocking
@@ -179,3 +205,190 @@ The simdjson library does not generally make use of heavy 256-bit instructions. 
 the macro `SIMDJSON_AVX512_ALLOWED` to `0` in C++ prior to importing the headers.
 
 You may still be worried about which SIMD instruction set is used by simdjson.  Thankfully,  [you can always determine and change which architecture-specific implementation is used](implementation-selection.md) by simdjson. Thus even if your CPU supports AVX2, you do not need to use AVX2. You are in control.
+
+
+Free Padding
+-------
+
+For performance reasons, the simdjson library requires that the JSON input contain at least
+`simdjson::SIMDJSON_PADDING` bytes at the end of the stream. The value `simdjson::SIMDJSON_PADDING` is
+small (e.g., 64 bytes). On modern systems, you can safely read beyond an allocated buffers,
+as long as you remain within an allocated page. Pages on modern systems span at least 4 kilobytes,
+but can be significantly larger. E.g., Apple systems favour pages spanning 16 kilobytes.
+
+In effect, it means that you can almost always read a few bytes beyond your current buffer---without
+allocating extra memory. However, tools such as valgrind or memory sanitizers will flag such behavior as unsafe.
+You can still make sure of this capability in your code if you are an expert
+programmer and you are willing to silence sanitizer warnings.
+
+If you are building simdjson with C++17 or better, you can use `simdjson::padded_input`.
+The `padded_input` struct automatically manages padding for you. It can be constructed from a `std::string_view`, a C-style string with length, or a `std::string`. For `std::string`, it takes into account the reserved capacity when determining if sufficient padding exists. If the input already has sufficient padding (up to the end of the memory page), it creates a view without copying. Otherwise, it copies the data into a `padded_string` with proper padding.
+
+Example usage:
+
+```cpp
+std::string_view json = get_json_data();
+simdjson::padded_input input(json);  // Automatically pads if needed
+auto result = parser.parse(input);
+
+// Also works with std::string, considering capacity
+std::string json_str = get_json_string();
+json_str.reserve(json_str.size() + 100);  // Reserve extra space
+simdjson::padded_input input2(json_str);  // May avoid copying if capacity is sufficient
+auto result2 = parser.parse(input2);
+```
+
+This simplifies padding management compared to manually checking and allocating.
+
+
+More generally, the following code provides a portable example.
+
+
+
+The conditional compilation checks for the `_MSC_VER` macro (indicating Microsoft Visual Studio)
+and includes platform-specific headers accordingly.
+The `page_size()` function determines the default size of a memory page in bytes on the system.
+On Windows (when `_WIN32` is defined), it uses `GetSystemInfo()` to retrieve system information and obtain the page size.
+On other platforms (non-Windows), it uses `sysconf(_SC_PAGESIZE)` to get the page size.
+The function returns the page size.
+The `need_allocation()` function checks whether the buffer (given by `buf`) plus the specified length (`len`) is near a page boundary.
+If the buffer extends beyond the current page when padded by `simdjson::SIMDJSON_PADDING`, it returns true, indicating that reallocation is needed.
+Otherwise, it returns false.
+The `get_padded_string_view()`  creates a `padded_string_view` from the input buffer.
+If reallocation is needed (unlikely case), it allocates a new padded_string and assigns it to `jsonbuffer`.
+Otherwise (very likely), it creates a `padded_string_view` directly from the buffer.
+The `simdjson::SIMDJSON_PADDING` ensures that there is additional padding for parsing efficiency.
+The calling code just needs to provide `jsonbuffer` (an instance of `simdjson::padded_string`)
+and pass `get_padded_string_view(buf, len, jsonbuffer)` to  `parser.iterate`. Most of the time,
+this code will not allocate new memory.
+
+
+```cpp
+#ifdef _WIN32
+#include <windows.h>
+#include <sysinfoapi.h>
+#else
+#include <unistd.h>
+#endif
+#include "simdjson.h"
+#include <cstdio>
+
+// Returns the default size of the page in bytes on this system.
+long page_size() {
+#ifdef _WIN32
+  SYSTEM_INFO sysInfo;
+  GetSystemInfo(&sysInfo);
+  long pagesize = sysInfo.dwPageSize;
+#else
+  long pagesize = sysconf(_SC_PAGESIZE);
+#endif
+  return pagesize;
+}
+
+// Returns true if the buffer + len + simdjson::SIMDJSON_PADDING crosses the
+// page boundary. Assumes len != 0.
+bool need_allocation(const char *buf, size_t len) {
+  return ((reinterpret_cast<uintptr_t>(buf + len - 1) % page_size())
+    + simdjson::SIMDJSON_PADDING >= static_cast<uintptr_t>(page_size()));
+}
+
+simdjson::padded_string_view
+get_padded_string_view(const char *buf, size_t len,
+                       simdjson::padded_string &jsonbuffer) {
+  if (need_allocation(buf, len)) { // unlikely case
+    jsonbuffer = simdjson::padded_string(buf, len);
+    return jsonbuffer;
+  } else { // no reallcation needed (very likely)
+    return simdjson::padded_string_view(buf, len,
+                                            len + simdjson::SIMDJSON_PADDING);
+  }
+}
+
+int main() {
+  printf("page_size: %ld\n", page_size());
+  const char *jsonpoiner = R"(
+        {
+            "key": "value"
+        }
+    )";
+  size_t len = strlen(jsonpoiner);
+  simdjson::padded_string jsonbuffer; // only allocate if needed
+  simdjson::ondemand::parser parser;
+  simdjson::ondemand::document doc;
+  simdjson::error_code error =
+      parser.iterate(get_padded_string_view(jsonpoiner, len, jsonbuffer))
+          .get(doc);
+  if (error) {
+    printf("error: %s\n", simdjson::error_message(error));
+    return EXIT_FAILURE;
+  }
+  std::string_view value;
+  error = doc["key"].get_string().get(value);
+  if (error) {
+    return EXIT_FAILURE;
+  }
+  printf("Value: \"%.*s\"\n", (int)value.size(), value.data());
+  if (value != "value") {
+    return EXIT_FAILURE;
+  }
+  return EXIT_SUCCESS;
+}
+```
+
+Further, whenever you allocate N bytes, memory allocators tend to allocate more memory, without you necessarily knowing about it. Under linux, you can use the `malloc_usable_size` function to see how much memory was actually allocated.
+Under an Apple plateform, you can  `malloc_size`. The following program illustrates the usage.
+
+```cpp
+#include <iostream>
+#include <cstddef>
+#include <memory>
+#include <cstdlib>
+#ifdef __APPLE__
+#include <malloc/malloc.h>  // for malloc_size on macOS
+#endif
+#ifdef __linux__
+#include <malloc.h> // for malloc_usable_size on Linux
+#endif
+size_t get_usable_size(void* ptr) {
+#ifdef __linux__
+    return malloc_usable_size(ptr);
+#elif defined(__APPLE__)
+    return malloc_size(ptr);
+#else
+    return 0;  // Unsupported platform
+#endif
+}
+
+int main() {
+    std::cout << "Demonstrating allocation overhead and rounding with operator new\n\n";
+
+#ifdef __linux__
+    std::cout << "Platform: Linux\n";
+#elif defined(__APPLE__)
+    std::cout << "Platform: macOS (using malloc_size)\n";
+#else
+    std::cout << "Platform: Other/unsupported (usable size will show 0)\n";
+#endif
+
+    std::cout << "Requested size | Actual usable size\n";
+    std::cout << "---------------|-------------------\n";
+    size_t total_requested = 0;
+    size_t total_usable = 0;
+    for (size_t requested = 1; requested <= 4096; requested++) {
+        total_requested += requested;
+        std::unique_ptr<char[]> ptr(new char[requested]);  // Allocate
+        size_t usable = get_usable_size(ptr.get());  // Get usable size
+        total_usable += usable;
+
+        std::cout << requested << "\t       | " << usable << "\n";
+    }
+    std::cout << "---------------|-------------------\n";
+    std::cout << "Total requested: " << total_requested << " bytes\n";
+    std::cout << "Total usable:    " << total_usable << " bytes\n";
+    std::cout << "Total overhead:  " << (total_usable - total_requested) << " bytes\n";
+    std::cout << "Percentage overhead: "
+              << ((total_usable - total_requested) * 100.0 / total_requested) << " %\n";
+
+    return EXIT_SUCCESS;
+}
+```

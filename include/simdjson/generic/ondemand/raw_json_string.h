@@ -1,12 +1,14 @@
-#include "simdjson/error.h"
+#ifndef SIMDJSON_GENERIC_ONDEMAND_RAW_JSON_STRING_H
+
+#ifndef SIMDJSON_CONDITIONAL_INCLUDE
+#define SIMDJSON_GENERIC_ONDEMAND_RAW_JSON_STRING_H
+#include "simdjson/generic/ondemand/base.h"
+#include "simdjson/generic/implementation_simdjson_result_base.h"
+#endif // SIMDJSON_CONDITIONAL_INCLUDE
 
 namespace simdjson {
 namespace SIMDJSON_IMPLEMENTATION {
 namespace ondemand {
-
-class object;
-class parser;
-class json_iterator;
 
 /**
  * A string escaped per JSON rules, terminated with quote ("). They are used to represent
@@ -38,7 +40,7 @@ public:
    *
    * Exists so you can declare a variable and later assign to it before use.
    */
-  simdjson_inline raw_json_string() noexcept = default;
+  simdjson_inline raw_json_string() noexcept {}
 
   /**
    * Create a new invalid raw_json_string pointed at the given location in the JSON.
@@ -55,6 +57,12 @@ public:
    * has outlived its existence.
    */
   simdjson_inline const char * raw() const noexcept;
+
+  /**
+   * Get the character at index i. This is unchecked.
+   * [0] when the string is of length 0 returns the final quote (").
+   */
+  simdjson_inline char operator[](size_t i) const noexcept;
 
   /**
    * This compares the current instance to the std::string_view target: returns true if
@@ -125,6 +133,28 @@ public:
 
 private:
 
+  /**
+   * Returns true if target ends with an odd number of backslashes. The last one
+   * then escapes the quote that follows the matching bytes in the raw string, so
+   * that quote does not end the string. Not inlined: callers check the last byte
+   * first, and keys ending in a backslash are rare.
+   */
+  static simdjson_never_inline bool ends_with_unpaired_backslash(std::string_view target) noexcept {
+    size_t backslash_count{0};
+    while(backslash_count < target.size() && target[target.size() - 1 - backslash_count] == '\\') {
+      backslash_count++;
+    }
+    return backslash_count % 2 == 1;
+  }
+
+  /**
+   * True when a byte-for-byte match must be rejected because target escapes the
+   * closing quote. The last-byte test keeps the counting loop off the common path.
+   */
+  static simdjson_inline bool escapes_trailing_quote(std::string_view target) noexcept {
+    return simdjson_unlikely(!target.empty() && target[target.size() - 1] == '\\')
+        && ends_with_unpaired_backslash(target);
+  }
 
   /**
    * This will set the inner pointer to zero, effectively making
@@ -195,8 +225,10 @@ public:
   simdjson_inline ~simdjson_result() noexcept = default; ///< @private
 
   simdjson_inline simdjson_result<const char *> raw() const noexcept;
+  simdjson_inline char operator[](size_t) const noexcept;
   simdjson_inline simdjson_warn_unused simdjson_result<std::string_view> unescape(SIMDJSON_IMPLEMENTATION::ondemand::json_iterator &iter, bool allow_replacement) const noexcept;
   simdjson_inline simdjson_warn_unused simdjson_result<std::string_view> unescape_wobbly(SIMDJSON_IMPLEMENTATION::ondemand::json_iterator &iter) const noexcept;
 };
-
 } // namespace simdjson
+
+#endif // SIMDJSON_GENERIC_ONDEMAND_RAW_JSON_STRING_H

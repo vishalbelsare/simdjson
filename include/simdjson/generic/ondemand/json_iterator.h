@@ -1,14 +1,15 @@
+#ifndef SIMDJSON_GENERIC_ONDEMAND_JSON_ITERATOR_H
+
+#ifndef SIMDJSON_CONDITIONAL_INCLUDE
+#define SIMDJSON_GENERIC_ONDEMAND_JSON_ITERATOR_H
+#include "simdjson/generic/ondemand/base.h"
+#include "simdjson/generic/implementation_simdjson_result_base.h"
+#include "simdjson/generic/ondemand/token_iterator.h"
+#endif // SIMDJSON_CONDITIONAL_INCLUDE
+
 namespace simdjson {
 namespace SIMDJSON_IMPLEMENTATION {
 namespace ondemand {
-
-class document;
-class document_stream;
-class object;
-class array;
-class value;
-class raw_json_string;
-class parser;
 
 /**
  * Iterates through JSON tokens, keeping track of depth and string buffer.
@@ -59,9 +60,12 @@ protected:
    * value of this attribute.
    */
   bool _streaming{false};
+#ifdef SIMDJSON_EXPERIMENTAL_ALLOW_INCOMPLETE_JSON
+  bool _allow_incomplete_json{false};
+#endif
 
 public:
-  simdjson_inline json_iterator() noexcept = default;
+  simdjson_inline json_iterator() noexcept {}
   simdjson_inline json_iterator(json_iterator &&other) noexcept;
   simdjson_inline json_iterator &operator=(json_iterator &&other) noexcept;
   simdjson_inline explicit json_iterator(const json_iterator &other) noexcept = default;
@@ -83,6 +87,10 @@ public:
    * start_root_array() and start_root_object().
    */
   simdjson_inline bool streaming() const noexcept;
+#ifdef SIMDJSON_EXPERIMENTAL_ALLOW_INCOMPLETE_JSON
+  simdjson_inline bool allow_incomplete_json() const noexcept;
+  simdjson_inline size_t remaining_input_length(const uint8_t *json) const noexcept;
+#endif // SIMDJSON_EXPERIMENTAL_ALLOW_INCOMPLETE_JSON
 
   /**
    * Get the root value iterator
@@ -145,7 +153,7 @@ public:
    * @param delta The relative position of the token to retrieve. e.g. 0 = next token, -1 = prev token.
    *
    * TODO consider a string_view, assuming the length will get stripped out by the optimizer when
-   * it isn't used ...
+   * it is not used ...
    */
   simdjson_inline const uint8_t *peek(int32_t delta=0) const noexcept;
   /**
@@ -173,7 +181,7 @@ public:
    * @param position The position of the token to retrieve.
    *
    * TODO consider a string_view, assuming the length will get stripped out by the optimizer when
-   * it isn't used ...
+   * it is not used ...
    */
   simdjson_inline const uint8_t *peek(token_position position) const noexcept;
   /**
@@ -185,12 +193,20 @@ public:
    */
   simdjson_inline uint32_t peek_length(token_position position) const noexcept;
   /**
+   * Get the maximum length of the JSON text for the current root token.
+   *
+   * The length will include any whitespace at the end of the token.
+   *
+   * @param position The position of the token to retrieve.
+   */
+  simdjson_inline uint32_t peek_root_length(token_position position) const noexcept;
+  /**
    * Get the JSON text for the last token in the document.
    *
    * This is not null-terminated; it is a view into the JSON.
    *
    * TODO consider a string_view, assuming the length will get stripped out by the optimizer when
-   * it isn't used ...
+   * it is not used ...
    */
   simdjson_inline const uint8_t *peek_last() const noexcept;
 
@@ -229,18 +245,19 @@ public:
    * @param error The error to report. Must not be SUCCESS, UNINITIALIZED, INCORRECT_TYPE, or NO_SUCH_FIELD.
    * @param message An error message to report with the error.
    */
-  simdjson_inline error_code report_error(error_code error, const char *message) noexcept;
+  simdjson_warn_unused simdjson_inline error_code report_error(error_code error, const char *message) noexcept;
 
   /**
    * Log error, but don't stop iteration.
    * @param error The error to report. Must be INCORRECT_TYPE, or NO_SUCH_FIELD.
    * @param message An error message to report with the error.
    */
-  simdjson_inline error_code optional_error(error_code error, const char *message) noexcept;
+  simdjson_warn_unused simdjson_inline error_code optional_error(error_code error, const char *message) noexcept;
 
   /**
    * Take an input in json containing max_len characters and attempt to copy it over to tmpbuf, a buffer with
    * N bytes of capacity. It will return false if N is too small (smaller than max_len) of if it is zero.
+   * Trailing whitespace, commas, and record separators (0x1E) do not count toward max_len.
    * The buffer (tmpbuf) is padded with space characters.
    */
   simdjson_warn_unused simdjson_inline bool copy_to_buffer(const uint8_t *json, uint32_t max_len, uint8_t *tmpbuf, size_t N) noexcept;
@@ -253,9 +270,10 @@ public:
    */
   simdjson_inline simdjson_result<std::string_view> unescape(raw_json_string in, bool allow_replacement) noexcept;
   simdjson_inline simdjson_result<std::string_view> unescape_wobbly(raw_json_string in) noexcept;
+
   simdjson_inline void reenter_child(token_position position, depth_t child_depth) noexcept;
 
-  simdjson_inline error_code consume_character(char c) noexcept;
+  simdjson_warn_unused  simdjson_inline error_code consume_character(char c) noexcept;
 #if SIMDJSON_DEVELOPMENT_CHECKS
   simdjson_inline token_position start_position(depth_t depth) const noexcept;
   simdjson_inline void set_start_position(depth_t depth, token_position position) noexcept;
@@ -272,8 +290,11 @@ public:
   /**
    * Updates this json iterator so that it is back at the beginning of the document,
    * as if it had just been created.
+   *
+   * An iterator that is no longer alive (e.g., abandoned after a fatal error) has no
+   * document to go back to: it is left as is and its error is returned.
    */
-  inline void rewind() noexcept;
+  simdjson_inline error_code rewind() noexcept;
   /**
    * This checks whether the {,},[,] are balanced so that the document
    * ends with proper zero depth. This requires scanning the whole document
@@ -283,6 +304,9 @@ public:
   inline bool balanced() const noexcept;
 protected:
   simdjson_inline json_iterator(const uint8_t *buf, ondemand::parser *parser) noexcept;
+#ifdef SIMDJSON_EXPERIMENTAL_ALLOW_INCOMPLETE_JSON
+  simdjson_inline json_iterator(const uint8_t *buf, ondemand::parser *parser, bool streaming) noexcept;
+#endif // SIMDJSON_EXPERIMENTAL_ALLOW_INCOMPLETE_JSON
   /// The last token before the end
   simdjson_inline token_position last_position() const noexcept;
   /// The token *at* the end. This points at gibberish and should only be used for comparison.
@@ -298,8 +322,11 @@ protected:
   friend class raw_json_string;
   friend class parser;
   friend class value_iterator;
-  friend simdjson_inline void logger::log_line(const json_iterator &iter, const char *title_prefix, const char *title, std::string_view detail, int delta, int depth_delta) noexcept;
-  friend simdjson_inline void logger::log_line(const json_iterator &iter, token_position index, depth_t depth, const char *title_prefix, const char *title, std::string_view detail) noexcept;
+  friend class field;
+  template <typename... Args>
+  friend simdjson_inline void logger::log_line(const json_iterator &iter, const char *title_prefix, const char *title, std::string_view detail, int delta, int depth_delta, logger::log_level level, Args&&... args) noexcept;
+  template <typename... Args>
+  friend simdjson_inline void logger::log_line(const json_iterator &iter, token_position index, depth_t depth, const char *title_prefix, const char *title, std::string_view detail, logger::log_level level, Args&&... args) noexcept;
 }; // json_iterator
 
 } // namespace ondemand
@@ -318,3 +345,5 @@ public:
 };
 
 } // namespace simdjson
+
+#endif // SIMDJSON_GENERIC_ONDEMAND_JSON_ITERATOR_H

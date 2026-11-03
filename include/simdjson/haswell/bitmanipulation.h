@@ -1,8 +1,14 @@
 #ifndef SIMDJSON_HASWELL_BITMANIPULATION_H
 #define SIMDJSON_HASWELL_BITMANIPULATION_H
 
+#ifndef SIMDJSON_CONDITIONAL_INCLUDE
+#include "simdjson/haswell/base.h"
+#include "simdjson/haswell/intrinsics.h"
+#include "simdjson/haswell/bitmask.h"
+#endif // SIMDJSON_CONDITIONAL_INCLUDE
+
 namespace simdjson {
-namespace SIMDJSON_IMPLEMENTATION {
+namespace haswell {
 namespace {
 
 // We sometimes call trailing_zero on inputs that are zero,
@@ -38,7 +44,7 @@ simdjson_inline int leading_zeroes(uint64_t input_num) {
 
 #if SIMDJSON_REGULAR_VISUAL_STUDIO
 simdjson_inline unsigned __int64 count_ones(uint64_t input_num) {
-  // note: we do not support legacy 32-bit Windows
+  // note: we do not support legacy 32-bit Windows in this kernel
   return __popcnt64(input_num);// Visual Studio wants two underscores
 }
 #else
@@ -47,19 +53,9 @@ simdjson_inline long long int count_ones(uint64_t input_num) {
 }
 #endif
 
-simdjson_inline bool add_overflow(uint64_t value1, uint64_t value2,
-                                uint64_t *result) {
-#if SIMDJSON_REGULAR_VISUAL_STUDIO
-  return _addcarry_u64(0, value1, value2,
-                       reinterpret_cast<unsigned __int64 *>(result));
-#else
-  return __builtin_uaddll_overflow(value1, value2,
-                                   reinterpret_cast<unsigned long long *>(result));
-#endif
-}
 
 } // unnamed namespace
-} // namespace SIMDJSON_IMPLEMENTATION
+} // namespace haswell
 } // namespace simdjson
 
 #endif // SIMDJSON_HASWELL_BITMANIPULATION_H

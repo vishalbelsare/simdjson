@@ -1,3 +1,12 @@
+#ifndef SIMDJSON_GENERIC_ONDEMAND_JSON_TYPE_INL_H
+
+#ifndef SIMDJSON_CONDITIONAL_INCLUDE
+#define SIMDJSON_GENERIC_ONDEMAND_JSON_TYPE_INL_H
+#include "simdjson/generic/ondemand/base.h"
+#include "simdjson/generic/ondemand/json_type.h"
+#include "simdjson/generic/implementation_simdjson_result_base-inl.h"
+#endif // SIMDJSON_CONDITIONAL_INCLUDE
+
 namespace simdjson {
 namespace SIMDJSON_IMPLEMENTATION {
 namespace ondemand {
@@ -10,7 +19,7 @@ inline std::ostream& operator<<(std::ostream& out, json_type type) noexcept {
         case json_type::string: out << "string"; break;
         case json_type::boolean: out << "boolean"; break;
         case json_type::null: out << "null"; break;
-        default: SIMDJSON_UNREACHABLE();
+        case json_type::unknown: out << "unknown"; break;
     }
     return out;
 }
@@ -38,7 +47,6 @@ simdjson_inline uint64_t number::get_uint64() const noexcept {
 simdjson_inline number::operator uint64_t() const noexcept {
   return get_uint64();
 }
-
 
 simdjson_inline bool number::is_int64() const noexcept {
   return get_number_type() == number_type::signed_integer;
@@ -105,3 +113,5 @@ simdjson_inline simdjson_result<SIMDJSON_IMPLEMENTATION::ondemand::json_type>::s
     : implementation_simdjson_result_base<SIMDJSON_IMPLEMENTATION::ondemand::json_type>(error) {}
 
 } // namespace simdjson
+
+#endif // SIMDJSON_GENERIC_ONDEMAND_JSON_TYPE_INL_H

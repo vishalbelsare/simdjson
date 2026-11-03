@@ -1,5 +1,4 @@
 include(CMakeDependentOption)
-include(import.cmake)
 
 option(SIMDJSON_ALLOW_DOWNLOADS
         "Allow dependencies to be downloaded during configure time"
@@ -8,21 +7,80 @@ option(SIMDJSON_ALLOW_DOWNLOADS
 cmake_dependent_option(SIMDJSON_COMPETITION "Compile competitive benchmarks" ON
         SIMDJSON_ALLOW_DOWNLOADS OFF)
 cmake_dependent_option(SIMDJSON_GOOGLE_BENCHMARKS "compile the Google Benchmark benchmarks" ON
-        SIMDJSON_ALLOW_DOWNLOADS OFF)
+        "SIMDJSON_ALLOW_DOWNLOADS OR MINGW" OFF)
 
-if(SIMDJSON_GOOGLE_BENCHMARKS)
-  set_off(BENCHMARK_ENABLE_TESTING)
-  set_off(BENCHMARK_ENABLE_INSTALL)
-  set_off(BENCHMARK_ENABLE_WERROR)
-
-  import_dependency(google_benchmarks google/benchmark v1.7.1)
-  add_dependency(google_benchmarks)
+# Without CPM (an offline build: see cmake/CPM.cmake), nothing is downloaded.
+if(SIMDJSON_GOOGLE_BENCHMARKS AND COMMAND CPMAddPackage)
+  CPMAddPackage(
+        NAME google_benchmarks
+        URL https://github.com/google/benchmark/archive/refs/tags/v1.9.5.zip
+        OPTIONS
+        "BENCHMARK_ENABLE_TESTING OFF"
+        "BENCHMARK_ENABLE_INSTALL OFF"
+        "BENCHMARK_ENABLE_WERROR OFF"
+  )
 endif()
 
-# The bulk of our benchmarking and testing data has been moved simdjson/simdjson-data
-import_dependency(simdjson-data simdjson/simdjson-data a5b13babe65c1bba7186b41b43d4cbdc20a5c470)
-add_dependency(simdjson-data)
+# The counters library (header-only) is used by most benchmarks.
+cmake_dependent_option(SIMDJSON_COUNTERS
+        "Download the counters library (used by most benchmarks)" ON
+        SIMDJSON_ALLOW_DOWNLOADS OFF)
 
+if(SIMDJSON_COUNTERS)
+  CPMAddPackage(
+        NAME counters
+        URL https://github.com/lemire/counters/archive/refs/tags/v3.1.0.zip
+        OPTIONS
+        "COUNTERS_BUILD_TESTS OFF"
+        "COUNTERS_INSTALL OFF"
+  )
+else()
+  # Offline builds (e.g., distribution packaging) can use an installed copy.
+  # The imported target is only visible in this directory, so wrap it in a
+  # regular (global) target that the benchmark directories can see.
+  find_package(Counters CONFIG QUIET)
+  if(TARGET Counters::counters)
+    add_library(counters INTERFACE)
+    target_link_libraries(counters INTERFACE Counters::counters)
+  endif()
+endif()
+
+# The simdjson-data test files. A local copy is used when there is one:
+# CPM_simdjson-data_SOURCE, or dependencies/.cache/simdjson-data (where
+# distribution packages such as the FreeBSD port put it). Otherwise, they are
+# downloaded, unless SIMDJSON_ALLOW_DOWNLOADS is OFF.
+set(SIMDJSON_DATA_SOURCE "")
+if(CPM_simdjson-data_SOURCE)
+  set(SIMDJSON_DATA_SOURCE "${CPM_simdjson-data_SOURCE}")
+elseif(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/.cache/simdjson-data/CMakeLists.txt")
+  set(SIMDJSON_DATA_SOURCE "${CMAKE_CURRENT_SOURCE_DIR}/.cache/simdjson-data")
+endif()
+if(SIMDJSON_DATA_SOURCE)
+  message(STATUS "Using the simdjson-data test files in ${SIMDJSON_DATA_SOURCE}")
+  add_subdirectory("${SIMDJSON_DATA_SOURCE}" "${CMAKE_CURRENT_BINARY_DIR}/simdjson-data")
+elseif(SIMDJSON_ALLOW_DOWNLOADS)
+  CPMAddPackage(
+        NAME simdjson-data
+        URL https://github.com/simdjson/simdjson-data/archive/351949906abde446f0314bf79606fb5d884f5be7.zip
+  )
+endif()
+# Without simdjson-data (e.g., offline, or FETCHCONTENT_FULLY_DISCONNECTED=ON
+# without a populated copy), the tests that need it are not built: see
+# SIMDJSON_HAS_TEST_DATA in the tests. The others use the few files in
+# jsonexamples/ of this repository.
+if(TARGET test-data)
+  set(SIMDJSON_HAS_TEST_DATA ON PARENT_SCOPE)
+else()
+  message(WARNING "The simdjson-data test files are unavailable: the tests "
+                  "that need them are skipped. See 'Offline builds' in "
+                  "HACKING.md.")
+  set(SIMDJSON_HAS_TEST_DATA OFF PARENT_SCOPE)
+  add_library(test-data INTERFACE)
+  target_compile_definitions(test-data INTERFACE
+    SIMDJSON_BENCHMARK_DATA_DIR="${PROJECT_SOURCE_DIR}/jsonexamples/")
+endif()
+
+option(SIMDJSON_USE_BOOST_JSON "Try to include BOOST_JSON, this may break your binaries under some systems." OFF)
 # This prevents variables declared with set() from unnecessarily escaping and
 # should not be called more than once
 function(competition_scope_)
@@ -36,62 +94,31 @@ function(competition_scope_)
 #endif
 
 int main() {}
-]] USE_BOOST_JSON)
-  if(USE_BOOST_JSON)
-    import_dependency(boostjson boostorg/json ee8d72d)
+]] SIMDJSON_FOUND_STRING_VIEW)
+  if(SIMDJSON_FOUND_STRING_VIEW AND SIMDJSON_USE_BOOST_JSON)
+    CPMAddPackage(
+        NAME boostjson
+        URL https://github.com/boostorg/json/archive/ee8d72d8502b409b5561200299cad30ccdb91415.zip
+    )
     add_library(boostjson STATIC "${boostjson_SOURCE_DIR}/src/src.cpp")
     target_compile_definitions(boostjson PUBLIC BOOST_JSON_STANDALONE)
     target_include_directories(boostjson SYSTEM PUBLIC
             "${boostjson_SOURCE_DIR}/include")
     target_compile_definitions(boostjson INTERFACE SIMDJSON_COMPETITION_BOOSTJSON)
   endif()
+  CPMAddPackage(
+      NAME nlohmann_json
+      URL https://github.com/nlohmann/json/archive/refs/tags/v3.12.0.zip
+  )
 
-  import_dependency(cjson DaveGamble/cJSON c69134d)
-  add_library(cjson STATIC "${cjson_SOURCE_DIR}/cJSON.c")
-  target_include_directories(cjson SYSTEM PUBLIC "${cjson_SOURCE_DIR}")
-  target_compile_definitions(cjson INTERFACE SIMDJSON_COMPETITION_CJSON)
+  set_property(TARGET nlohmann_json APPEND PROPERTY INTERFACE_COMPILE_DEFINITIONS SIMDJSON_COMPETITION_NLOHMANN_JSON)
 
-  import_dependency(fastjson mikeando/fastjson 485f994)
-  add_library(fastjson STATIC
-          "${fastjson_SOURCE_DIR}/src/fastjson.cpp"
-          "${fastjson_SOURCE_DIR}/src/fastjson2.cpp"
-          "${fastjson_SOURCE_DIR}/src/fastjson_dom.cpp")
-  target_include_directories(fastjson SYSTEM PUBLIC
-          "${fastjson_SOURCE_DIR}/include")
-  target_compile_definitions(fastjson INTERFACE SIMDJSON_COMPETITION_FASTJSON)
 
-  import_dependency(gason vivkin/gason 7aee524)
-  add_library(gason STATIC "${gason_SOURCE_DIR}/src/gason.cpp")
-  target_include_directories(gason SYSTEM PUBLIC "${gason_SOURCE_DIR}/src")
-  target_compile_definitions(gason INTERFACE SIMDJSON_COMPETITION_GASON)
-
-  import_dependency(jsmn zserge/jsmn 18e9fe4)
-  add_library(jsmn STATIC "${jsmn_SOURCE_DIR}/jsmn.c")
-  target_include_directories(jsmn SYSTEM PUBLIC "${jsmn_SOURCE_DIR}")
-  target_compile_definitions(jsmn INTERFACE SIMDJSON_COMPETITION_JSMN)
-
-  message(STATUS "Importing json (nlohmann/json@v3.10.5)")
-  set(nlohmann_json_SOURCE_DIR "${dep_root}/json")
-  if(NOT EXISTS "${nlohmann_json_SOURCE_DIR}")
-    file(DOWNLOAD
-            "https://github.com/nlohmann/json/releases/download/v3.10.5/json.hpp"
-            "${nlohmann_json_SOURCE_DIR}/nlohmann/json.hpp")
-  endif()
-  add_library(nlohmann_json INTERFACE)
-  target_include_directories(nlohmann_json SYSTEM INTERFACE "${nlohmann_json_SOURCE_DIR}")
-  target_compile_definitions(nlohmann_json INTERFACE SIMDJSON_COMPETITION_NLOHMANN_JSON)
-
-  import_dependency(json11 dropbox/json11 ec4e452)
-  add_library(json11 STATIC "${json11_SOURCE_DIR}/json11.cpp")
-  target_include_directories(json11 SYSTEM PUBLIC "${json11_SOURCE_DIR}")
-  target_compile_definitions(json11 INTERFACE SIMDJSON_COMPETITION_JSON11)
-
-  set(jsoncpp_SOURCE_DIR "${simdjson_SOURCE_DIR}/dependencies/jsoncppdist")
-  add_library(jsoncpp STATIC "${jsoncpp_SOURCE_DIR}/jsoncpp.cpp")
-  target_include_directories(jsoncpp SYSTEM PUBLIC "${jsoncpp_SOURCE_DIR}")
-  target_compile_definitions(jsoncpp INTERFACE SIMDJSON_COMPETITION_JSONCPP)
-
-  import_dependency(rapidjson Tencent/rapidjson f54b0e4)
+  CPMAddPackage(
+      NAME rapidjson
+      URL https://github.com/Tencent/rapidjson/archive/805d7ed5dfe97a39b8b0816fd5eeed8731dc4936.zip
+      DOWNLOAD_ONLY YES
+  )
   add_library(rapidjson INTERFACE)
   target_compile_definitions(rapidjson INTERFACE RAPIDJSON_HAS_STDSTRING)
   include (TestBigEndian)
@@ -104,39 +131,42 @@ int main() {}
   target_compile_definitions(rapidjson INTERFACE RAPIDJSON_HAS_STDSTRING)
   target_include_directories(rapidjson SYSTEM INTERFACE
           "${rapidjson_SOURCE_DIR}/include")
-  target_compile_definitions(rapidjson INTERFACE SIMDJSON_COMPETITION_RAPIDJSON)
+  if (CMAKE_COMPILER_IS_GNUCC AND CMAKE_CXX_COMPILER_VERSION VERSION_GREATER_EQUAL 14)
+    message(STATUS "Disabling rapidjson")
+  else()
+    target_compile_definitions(rapidjson INTERFACE SIMDJSON_COMPETITION_RAPIDJSON)
+  endif()
 
-  import_dependency(sajson chadaustin/sajson 2dcfd35)
+  CPMAddPackage(
+      NAME sajson
+      URL https://github.com/chadaustin/sajson/archive/2dcfd350586375f9910f74821d4f07d67ae455ba.zip
+      DOWNLOAD_ONLY YES
+  )
   add_library(sajson INTERFACE)
   target_compile_definitions(sajson INTERFACE SAJSON_UNSORTED_OBJECT_KEYS)
   target_include_directories(sajson SYSTEM INTERFACE
           "${sajson_SOURCE_DIR}/include")
   target_compile_definitions(sajson INTERFACE SIMDJSON_COMPETITION_SAJSON)
 
-  import_dependency(ujson4c esnme/ujson4c e14f3fd)
-  add_library(ujson4c STATIC
-          "${ujson4c_SOURCE_DIR}/src/ujdecode.c"
-          "${ujson4c_SOURCE_DIR}/3rdparty/ultrajsondec.c")
-  target_include_directories(ujson4c SYSTEM PUBLIC
-          "${ujson4c_SOURCE_DIR}/src"
-          "${ujson4c_SOURCE_DIR}/3rdparty")
-  target_compile_definitions(ujson4c INTERFACE SIMDJSON_COMPETITION_UJSON4C)
-
-  import_dependency(yyjson ibireme/yyjson c385651)
+  CPMAddPackage(
+      NAME yyjson
+      URL https://github.com/ibireme/yyjson/archive/c3856514de0a67d7b66939bf3ed491a2d6e61277.zip
+      DOWNLOAD_ONLY YES
+  )
   add_library(yyjson STATIC "${yyjson_SOURCE_DIR}/src/yyjson.c")
   target_include_directories(yyjson SYSTEM PUBLIC "${yyjson_SOURCE_DIR}/src")
   target_compile_definitions(yyjson INTERFACE SIMDJSON_COMPETITION_YYJSON)
 
   add_library(competition-core INTERFACE)
-  target_link_libraries(competition-core INTERFACE nlohmann_json rapidjson sajson cjson jsmn yyjson)
+  target_link_libraries(competition-core INTERFACE nlohmann_json rapidjson sajson yyjson)
 
-  if(USE_BOOST_JSON)
+  if(TARGET boostjson)
      target_compile_definitions(boostjson INTERFACE HAS_BOOST_JSON)
      target_link_libraries(competition-core INTERFACE boostjson)
   endif()
 
   add_library(competition-all INTERFACE)
-  target_link_libraries(competition-all INTERFACE competition-core jsoncpp json11 fastjson gason ujson4c)
+  target_link_libraries(competition-all INTERFACE competition-core)
 endfunction()
 
 if(SIMDJSON_COMPETITION)
@@ -147,10 +177,12 @@ cmake_dependent_option(SIMDJSON_CXXOPTS "Download cxxopts (necessary for tools)"
         SIMDJSON_ALLOW_DOWNLOADS OFF)
 
 if(SIMDJSON_CXXOPTS)
-  set_off(CXXOPTS_BUILD_EXAMPLES)
-  set_off(CXXOPTS_BUILD_TESTS)
-  set_off(CXXOPTS_ENABLE_INSTALL)
-
-  import_dependency(cxxopts jarro2783/cxxopts 794c975)
-  add_dependency(cxxopts)
+  CPMAddPackage(
+        NAME cxxopts
+        URL https://github.com/jarro2783/cxxopts/archive/59656709c0c58fcd0ed18b38e02938dbe05284c5.zip
+        OPTIONS
+        "CXXOPTS_BUILD_EXAMPLES OFF"
+        "CXXOPTS_BUILD_TESTS OFF"
+        "CXXOPTS_ENABLE_INSTALL OFF"
+  )
 endif()

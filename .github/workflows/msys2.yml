@@ -1,6 +1,17 @@
 name: MSYS2-CI
 
-on: [push, pull_request]
+on:
+  push:
+    branches:
+      - master
+  pull_request:
+  workflow_dispatch:
+
+# A new push to a pull request cancels its previous run. Other runs (pushes to
+# master, schedules) get a group of their own and are never cancelled.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event_name == 'pull_request' && github.ref || github.run_id }}
+  cancel-in-progress: true
 
 jobs:
   windows-mingw:
@@ -26,8 +37,8 @@ jobs:
       CMAKE_GENERATOR: Ninja
 
     steps:
-      - uses: actions/checkout@v3
-      - uses: actions/cache@v3
+      - uses: actions/checkout@v6
+      - uses: actions/cache@v5
         with:
           path: dependencies/.cache
           key: ${{ hashFiles('dependencies/CMakeLists.txt') }}

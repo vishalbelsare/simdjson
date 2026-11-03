@@ -144,14 +144,20 @@ namespace parse_api_tests {
     }
 
     {
-      std::string json = "12";
+      std::string json = "12345642314123421321321321321321312321321321321312";
       json.shrink_to_fit();
       cout << "- string, 0 padding" << endl;
-      ASSERT_ERROR( parser.iterate(json), INSUFFICIENT_PADDING );
+      ASSERT_SUCCESS( parser.iterate(json) );
+    }
+
+    {
+      std::string json = "12345642314123421321321321321321312321321321321312";
+      json.shrink_to_fit();
+      cout << "- string, 0 padding" << endl;
+      ASSERT_ERROR( parser.iterate((const std::string&)json), INSUFFICIENT_PADDING );
       // It's actually kind of hard to allocate "just enough" capacity, since the string tends
       // to grow more than you tell it to.
     }
-
     TEST_SUCCEED();
   }
 
@@ -201,7 +207,7 @@ namespace parse_api_tests {
 
     std::cout << "truncated document " << std::endl;
     ASSERT_SUCCESS( parser.iterate(jsonbad).get(doc) );
-    ASSERT_EQUAL( simdjson::to_json_string(doc).get(output), TAPE_ERROR );
+    ASSERT_EQUAL( simdjson::to_json_string(doc).get(output), INCOMPLETE_ARRAY_OR_OBJECT );
 
     std::cout << "correct document with new doc" << std::endl;
     ondemand::document doc2;
@@ -220,7 +226,7 @@ namespace parse_api_tests {
 
     std::cout << "unclosed string document " << std::endl;
     ASSERT_SUCCESS( parser.iterate(jsonbad).get(doc) );
-    ASSERT_EQUAL( simdjson::to_json_string(doc).get(output), TAPE_ERROR );
+    ASSERT_EQUAL( simdjson::to_json_string(doc).get(output), INCOMPLETE_ARRAY_OR_OBJECT );
 
     // next two lines are terrible code.
     doc.~document();

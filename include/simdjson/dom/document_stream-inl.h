@@ -1,14 +1,18 @@
-#ifndef SIMDJSON_INLINE_DOCUMENT_STREAM_H
-#define SIMDJSON_INLINE_DOCUMENT_STREAM_H
+#ifndef SIMDJSON_DOCUMENT_STREAM_INL_H
+#define SIMDJSON_DOCUMENT_STREAM_INL_H
 
+#include "simdjson/dom/base.h"
 #include "simdjson/dom/document_stream.h"
-#include <algorithm>
-#include <limits>
-#include <stdexcept>
+#include "simdjson/dom/element-inl.h"
+#include "simdjson/dom/parser-inl.h"
+#include "simdjson/error-inl.h"
+#include "simdjson/internal/dom_parser_implementation.h"
+
 namespace simdjson {
 namespace dom {
 
 #ifdef SIMDJSON_THREADS_ENABLED
+
 inline void stage1_worker::finish() {
   // After calling "run" someone would call finish() to wait
   // for the end of the processing.
@@ -85,12 +89,14 @@ simdjson_inline document_stream::document_stream(
   dom::parser &_parser,
   const uint8_t *_buf,
   size_t _len,
-  size_t _batch_size
+  size_t _batch_size,
+  stream_format _format
 ) noexcept
   : parser{&_parser},
     buf{_buf},
     len{_len},
     batch_size{_batch_size <= MINIMAL_BATCH_SIZE ? MINIMAL_BATCH_SIZE : _batch_size},
+    format{_format},
     error{SUCCESS}
 #ifdef SIMDJSON_THREADS_ENABLED
     , use_thread(_parser.threaded) // we need to make a copy because _parser.threaded can change
@@ -108,6 +114,7 @@ simdjson_inline document_stream::document_stream() noexcept
     buf{nullptr},
     len{0},
     batch_size{0},
+    format{stream_format::whitespace_delimited},
     error{UNINITIALIZED}
 #ifdef SIMDJSON_THREADS_ENABLED
     , use_thread(false)
@@ -184,6 +191,7 @@ inline void document_stream::start() noexcept {
   if (error) { return; }
   error = parser->ensure_capacity(batch_size);
   if (error) { return; }
+  parser->implementation->_number_as_string = parser->number_as_string();
   // Always run the first stage 1 parse immediately
   batch_start = 0;
   error = run_stage1(*parser, batch_start);
@@ -194,11 +202,19 @@ inline void document_stream::start() noexcept {
     error = run_stage1(*parser, batch_start);
   }
   if (error) { return; }
+  load_stage2();
 #ifdef SIMDJSON_THREADS_ENABLED
   if (use_thread && next_batch_start() < len) {
     // Kick off the first thread if needed
+    // load_from_stage1_thread() swaps *parser with stage1_thread_parser, which
+    // then parses every other batch: give it the same settings.
+    stage1_thread_parser.set_max_capacity(parser->max_capacity());
+    stage1_thread_parser.number_as_string(parser->number_as_string());
+    error = stage1_thread_parser.allocate(batch_size, parser->max_depth());
+    if (error) { return; }
     error = stage1_thread_parser.ensure_capacity(batch_size);
     if (error) { return; }
+    stage1_thread_parser.implementation->_number_as_string = parser->number_as_string();
     worker->start_thread();
     start_stage1_thread();
     if (error) { return; }
@@ -213,13 +229,53 @@ simdjson_inline size_t document_stream::iterator::current_index() const noexcept
 
 simdjson_inline std::string_view document_stream::iterator::source() const noexcept {
   const char* start = reinterpret_cast<const char*>(stream->buf) + current_index();
+  if (stream->error) {
+    return std::string_view(start, stream->len - current_index());
+  }
   bool object_or_array = ((*start == '[') || (*start == '{'));
   if(object_or_array) {
     size_t next_doc_index = stream->batch_start + stream->parser->implementation->structural_indexes[stream->parser->implementation->next_structural_index - 1];
     return std::string_view(start, next_doc_index - current_index() + 1);
   } else {
     size_t next_doc_index = stream->batch_start + stream->parser->implementation->structural_indexes[stream->parser->implementation->next_structural_index];
-    return std::string_view(reinterpret_cast<const char*>(stream->buf) + current_index(), next_doc_index - current_index() - 1);
+    size_t svlen = next_doc_index - current_index();
+    // When the scalar is followed by a truncated document, the structural
+    // indexes of that document were dropped and next_doc_index is the end of
+    // the input, so we bound the scalar by scanning the token itself.
+    size_t token_len = 0;
+    if (*start == '"') {
+      token_len = 1;
+      while (token_len < svlen) {
+        char c = start[token_len++];
+        if (c == '\\') {
+          token_len++;
+        } else if (c == '"') {
+          break;
+        }
+      }
+    } else {
+      while (token_len < svlen) {
+        char c = start[token_len];
+        if (std::isspace(static_cast<unsigned char>(c)) || c == ',' || c == '{' || c == '[' || c == '\0' || static_cast<uint8_t>(c) == 0x1E) {
+          break;
+        }
+        token_len++;
+      }
+    }
+    if (token_len > 0 && token_len < svlen) {
+      svlen = token_len;
+    }
+    // Trim trailing whitespace, NUL, and RS (0x1E). In RFC 7464 json_sequence
+    // mode the scanner classifies RS as a scalar character, so an RS-prefixed
+    // scalar document (number/true/false/null/string) has no closing structural
+    // index and the slice runs all the way up to the next document's RS. RS
+    // cannot legally appear in a JSON value at the source level (control
+    // characters in strings must be escaped as \u001E), so stripping it is
+    // safe in every stream_format.
+    while(svlen > 1 && (std::isspace(static_cast<unsigned char>(start[svlen-1])) || start[svlen-1] == '\0' || static_cast<uint8_t>(start[svlen-1]) == 0x1E || (stream->format == stream_format::comma_delimited && start[svlen-1] == ','))) {
+      svlen--;
+    }
+    return std::string_view(start, svlen);
   }
 }
 
@@ -230,7 +286,7 @@ inline void document_stream::next() noexcept {
 
   // Load the next document from the batch
   doc_index = batch_start + parser->implementation->structural_indexes[parser->implementation->next_structural_index];
-  error = parser->implementation->stage2_next(parser->doc);
+  error = stage2_next_fn(*parser->implementation, parser->doc);
   // If that was the last document in the batch, load another batch (if available)
   while (error == EMPTY) {
     batch_start = next_batch_start();
@@ -246,9 +302,10 @@ inline void document_stream::next() noexcept {
     error = run_stage1(*parser, batch_start);
 #endif
     if (error) { continue; } // If the error was EMPTY, we may want to load another batch.
+    load_stage2();
     // Run stage 2 on the first document in the batch
     doc_index = batch_start + parser->implementation->structural_indexes[parser->implementation->next_structural_index];
-    error = parser->implementation->stage2_next(parser->doc);
+    error = stage2_next_fn(*parser->implementation, parser->doc);
   }
 }
 inline size_t document_stream::size_in_bytes() const noexcept {
@@ -256,6 +313,9 @@ inline size_t document_stream::size_in_bytes() const noexcept {
 }
 
 inline size_t document_stream::truncated_bytes() const noexcept {
+  // Stage 1 returns EMPTY on zero-length input before it writes the index
+  // sentinels read below, so they would still hold a previous stream's values.
+  if (len == 0) { return 0; }
   if(error == CAPACITY) { return len - batch_start; }
   return parser->implementation->structural_indexes[parser->implementation->n_structural_indexes] - parser->implementation->structural_indexes[parser->implementation->n_structural_indexes + 1];
 }
@@ -264,13 +324,72 @@ inline size_t document_stream::next_batch_start() const noexcept {
   return batch_start + parser->implementation->structural_indexes[parser->implementation->n_structural_indexes];
 }
 
+// Stage 1 cuts the batch after the last document that looks complete, and
+// leaves a sentinel structural index past it: stage 2 validates the documents,
+// and stops an invalid one at the sentinel because the byte there cannot
+// continue a document. That byte is not part of the batch, though: it is the
+// start of the next document, padding (which the caller need not initialize)
+// or the `]` that comma_delimited_array strips. When it is ',', ':', ']' or
+// '}', or when the batch ends where a value is expected, an invalid document
+// such as `[2` (before a truncated `[["`) could be accepted and run past the
+// batch, into stale indexes such as the quote of an unclosed string, and so
+// past the buffer. Stage 2 then walks this batch with an explicit bound (see
+// load_stage2). Other batches keep the unchecked walk.
+//
+// set_bounded_batch() makes that decision for the batch stage 1 just indexed.
+// Out of line: it runs once per batch, and inlined it would weigh on next().
+simdjson_never_inline void set_bounded_batch(internal::dom_parser_implementation &impl, const uint8_t *batch) noexcept {
+  bool bounded = false;
+  const uint32_t n = impl.n_structural_indexes;
+  if (n > 0) {
+    const uint8_t next = batch[impl.structural_indexes[n]];
+    const uint8_t last = batch[impl.structural_indexes[n - 1]];
+    bounded = next == ',' || next == ':' || next == ']' || next == '}' ||
+              last == ',' || last == ':' || last == '[' || last == '{';
+  }
+  impl._bounded_batch = bounded;
+}
+
+inline void document_stream::load_stage2() noexcept {
+  stage2_next_fn = parser->implementation->stage2_next_function(parser->implementation->_bounded_batch);
+}
+
 inline error_code document_stream::run_stage1(dom::parser &p, size_t _batch_start) noexcept {
   size_t remaining = len - _batch_start;
+  stage1_mode mode;
+  size_t batch_len;
   if (remaining <= batch_size) {
-    return p.implementation->stage1(&buf[_batch_start], remaining, stage1_mode::streaming_final);
+    // Final batch
+    switch (format) {
+      case stream_format::json_sequence:
+        mode = stage1_mode::json_sequence_final;
+        break;
+      case stream_format::comma_delimited:
+        mode = stage1_mode::comma_delimited_final;
+        break;
+      default:
+        mode = stage1_mode::streaming_final;
+        break;
+    }
+    batch_len = remaining;
   } else {
-    return p.implementation->stage1(&buf[_batch_start], batch_size, stage1_mode::streaming_partial);
+    // Partial batch
+    switch (format) {
+      case stream_format::json_sequence:
+        mode = stage1_mode::json_sequence_partial;
+        break;
+      case stream_format::comma_delimited:
+        mode = stage1_mode::comma_delimited_partial;
+        break;
+      default:
+        mode = stage1_mode::streaming_partial;
+        break;
+    }
+    batch_len = batch_size;
   }
+  error_code err = p.implementation->stage1(&buf[_batch_start], batch_len, mode);
+  if (!err) { set_bounded_batch(*p.implementation, &buf[_batch_start]); }
+  return err;
 }
 
 #ifdef SIMDJSON_THREADS_ENABLED
@@ -281,7 +400,12 @@ inline void document_stream::load_from_stage1_thread() noexcept {
   // enough memory to swap to, as well.
   std::swap(*parser, stage1_thread_parser);
   error = stage1_thread_error;
-  if (error) { return; }
+  // An EMPTY batch (no complete document in it, e.g. a run of white space at
+  // least batch_size long) is not the end of the stream: next() moves on to
+  // the batch after it, so queue that batch now as we would after a success.
+  // Returning here would leave no job for the next call, which then swaps
+  // the stale previous batch back in and ends the stream early.
+  if (error && error != EMPTY) { return; }
 
   // If there's anything left, start the stage 1 thread!
   if (next_batch_start() < len) {
@@ -337,4 +461,4 @@ simdjson_inline dom::document_stream::iterator simdjson_result<dom::document_str
 #endif // SIMDJSON_EXCEPTIONS
 
 } // namespace simdjson
-#endif // SIMDJSON_INLINE_DOCUMENT_STREAM_H
+#endif // SIMDJSON_DOCUMENT_STREAM_INL_H

@@ -1,3 +1,11 @@
+#ifndef SIMDJSON_SRC_GENERIC_STAGE1_UTF8_LOOKUP4_ALGORITHM_H
+
+#ifndef SIMDJSON_CONDITIONAL_INCLUDE
+#define SIMDJSON_SRC_GENERIC_STAGE1_UTF8_LOOKUP4_ALGORITHM_H
+#include <generic/stage1/base.h>
+#include <generic/dom_parser_implementation.h>
+#endif // SIMDJSON_CONDITIONAL_INCLUDE
+
 namespace simdjson {
 namespace SIMDJSON_IMPLEMENTATION {
 namespace {
@@ -99,7 +107,7 @@ using namespace simd;
       const simd8<uint8_t> prev_input, const simd8<uint8_t> sc) {
     simd8<uint8_t> prev2 = input.prev<2>(prev_input);
     simd8<uint8_t> prev3 = input.prev<3>(prev_input);
-    simd8<uint8_t> must23 = simd8<uint8_t>(must_be_2_3_continuation(prev2, prev3));
+    simd8<uint8_t> must23 = must_be_2_3_continuation(prev2, prev3);
     simd8<uint8_t> must23_80 = must23 & uint8_t(0x80);
     return must23_80 ^ sc;
   }
@@ -111,7 +119,7 @@ using namespace simd;
   simdjson_inline simd8<uint8_t> is_incomplete(const simd8<uint8_t> input) {
     // If the previous input's last 3 bytes match this, they're too short (they ended at EOF):
     // ... 1111____ 111_____ 11______
-#if SIMDJSON_IMPLEMENTATION_ICELAKE
+#if SIMDJSON_IMPLEMENTATION_ICELAKE || (SIMDJSON_IMPLEMENTATION_RVV_VLS && __riscv_v_fixed_vlen >= 512)
     static const uint8_t max_array[64] = {
       255, 255, 255, 255, 255, 255, 255, 255,
       255, 255, 255, 255, 255, 255, 255, 255,
@@ -162,14 +170,6 @@ using namespace simd;
       this->error |= this->prev_incomplete;
     }
 
-#ifndef SIMDJSON_IF_CONSTEXPR
-#if SIMDJSON_CPLUSPLUS17
-#define SIMDJSON_IF_CONSTEXPR if constexpr
-#else
-#define SIMDJSON_IF_CONSTEXPR if
-#endif
-#endif
-
     simdjson_inline void check_next_input(const simd8x64<uint8_t>& input) {
       if(simdjson_likely(is_ascii(input))) {
         this->error |= this->prev_incomplete;
@@ -180,30 +180,30 @@ using namespace simd;
                 || (simd8x64<uint8_t>::NUM_CHUNKS == 4),
                 "We support one, two or four chunks per 64-byte block.");
         SIMDJSON_IF_CONSTEXPR (simd8x64<uint8_t>::NUM_CHUNKS == 1) {
-          this->check_utf8_bytes(input.chunks[0], this->prev_input_block);
+          this->check_utf8_bytes(input.get<0>(), this->prev_input_block);
         } else SIMDJSON_IF_CONSTEXPR (simd8x64<uint8_t>::NUM_CHUNKS == 2) {
-          this->check_utf8_bytes(input.chunks[0], this->prev_input_block);
-          this->check_utf8_bytes(input.chunks[1], input.chunks[0]);
+          this->check_utf8_bytes(input.get<0>(), this->prev_input_block);
+          this->check_utf8_bytes(input.get<1>(), input.get<0>());
         } else SIMDJSON_IF_CONSTEXPR (simd8x64<uint8_t>::NUM_CHUNKS == 4) {
-          this->check_utf8_bytes(input.chunks[0], this->prev_input_block);
-          this->check_utf8_bytes(input.chunks[1], input.chunks[0]);
-          this->check_utf8_bytes(input.chunks[2], input.chunks[1]);
-          this->check_utf8_bytes(input.chunks[3], input.chunks[2]);
+          this->check_utf8_bytes(input.get<0>(), this->prev_input_block);
+          this->check_utf8_bytes(input.get<1>(), input.get<0>());
+          this->check_utf8_bytes(input.get<2>(), input.get<1>());
+          this->check_utf8_bytes(input.get<3>(), input.get<2>());
         }
-        this->prev_incomplete = is_incomplete(input.chunks[simd8x64<uint8_t>::NUM_CHUNKS-1]);
-        this->prev_input_block = input.chunks[simd8x64<uint8_t>::NUM_CHUNKS-1];
+        this->prev_incomplete = is_incomplete(input.get<simd8x64<uint8_t>::NUM_CHUNKS-1>());
+        this->prev_input_block = input.get<simd8x64<uint8_t>::NUM_CHUNKS-1>();
       }
     }
     // do not forget to call check_eof!
-    simdjson_inline error_code errors() {
+    simdjson_warn_unused simdjson_inline error_code errors() {
       return this->error.any_bits_set_anywhere() ? error_code::UTF8_ERROR : error_code::SUCCESS;
     }
 
   }; // struct utf8_checker
 } // namespace utf8_validation
 
-using utf8_validation::utf8_checker;
-
 } // unnamed namespace
 } // namespace SIMDJSON_IMPLEMENTATION
 } // namespace simdjson
+
+#endif // SIMDJSON_SRC_GENERIC_STAGE1_UTF8_LOOKUP4_ALGORITHM_H

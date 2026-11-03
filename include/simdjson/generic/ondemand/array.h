@@ -1,11 +1,17 @@
-#include "simdjson/error.h"
+#ifndef SIMDJSON_GENERIC_ONDEMAND_ARRAY_H
+
+#ifndef SIMDJSON_CONDITIONAL_INCLUDE
+#define SIMDJSON_GENERIC_ONDEMAND_ARRAY_H
+#include "simdjson/generic/ondemand/base.h"
+#include "simdjson/generic/implementation_simdjson_result_base.h"
+#include "simdjson/generic/ondemand/value_iterator.h"
+#include "simdjson/jsonpathutil.h"
+#include <vector>
+#endif // SIMDJSON_CONDITIONAL_INCLUDE
 
 namespace simdjson {
 namespace SIMDJSON_IMPLEMENTATION {
 namespace ondemand {
-
-class value;
-class document;
 
 /**
  * A forward-only JSON array.
@@ -17,14 +23,25 @@ public:
    *
    * Exists so you can declare a variable and later assign to it before use.
    */
-  simdjson_inline array() noexcept = default;
+  simdjson_inline array() noexcept {}
 
   /**
    * Begin array iteration.
    *
    * Part of the std::iterable interface.
+   *
+   * With SIMDJSON_DEVELOPMENT_CHECKS, the iterator locks this array while it is
+   * alive, so that reentrant access (at(), count_elements(), reset(), ...) is
+   * reported as OUT_OF_ORDER_ITERATION.
    */
-  simdjson_inline simdjson_result<array_iterator> begin() noexcept;
+  simdjson_inline simdjson_result<array_iterator> begin() & noexcept;
+  /**
+   * Begin iteration over a temporary array, e.g., `v.get_array().begin()`.
+   *
+   * The iterator does not depend on the array instance and may outlive it, so
+   * it does not lock it.
+   */
+  simdjson_inline simdjson_result<array_iterator> begin() && noexcept;
   /**
    * Sentinel representing the end of the array.
    *
@@ -40,7 +57,8 @@ public:
    * calling this function, if successful, the array is 'rewinded' at its
    * beginning as if it had never been accessed. If the JSON is malformed (e.g.,
    * there is a missing comma), then an error is returned and it is no longer
-   * safe to continue.
+   * safe to continue. Note that count_elements() does not validate the JSON values,
+   * only the structure of the array.
    *
    * To check that an array is empty, it is more performant to use
    * the is_empty() method.
@@ -96,6 +114,39 @@ public:
    *         - INVALID_JSON_POINTER if the JSON pointer is invalid and cannot be parsed
    */
   inline simdjson_result<value> at_pointer(std::string_view json_pointer) noexcept;
+
+  /**
+   * Get the value associated with the given JSONPath expression. We only support
+   * JSONPath queries that trivially convertible to JSON Pointer queries: key
+   * names and array indices.
+   *
+   * https://www.rfc-editor.org/rfc/rfc9535 (RFC 9535)
+   *
+   * @return The value associated with the given JSONPath expression, or:
+   *         - INVALID_JSON_POINTER if the JSONPath to JSON Pointer conversion fails
+   *         - NO_SUCH_FIELD if a field does not exist in an object
+   *         - INDEX_OUT_OF_BOUNDS if an array index is larger than an array length
+   *         - INCORRECT_TYPE if a non-integer is used to access an array
+  */
+  inline simdjson_result<value> at_path(std::string_view json_path) noexcept;
+
+  /**
+   * Call the provided callback for each value matching the given JSONPath
+   * expression with wildcard support.
+   * Supports wildcard patterns like "[*]" to match all array elements.
+   *
+   * @param json_path JSONPath expression with wildcards
+   * @param callback Function called for each matching value
+   * @return error_code indicating success or failure
+  */
+#if SIMDJSON_SUPPORTS_CONCEPTS
+  template <typename Func>
+    requires std::invocable<Func, value>
+#else
+  template <typename Func>
+#endif
+  inline error_code for_each_at_path_with_wildcard(std::string_view json_path, Func&& callback) noexcept;
+
   /**
    * Consumes the array and returns a string_view instance corresponding to the
    * array as represented in JSON. It points inside the original document.
@@ -110,11 +161,49 @@ public:
    *         - INDEX_OUT_OF_BOUNDS if the array index is larger than an array length
    */
   simdjson_inline simdjson_result<value> at(size_t index) noexcept;
+
+#if SIMDJSON_SUPPORTS_CONCEPTS
+  /**
+   * Get this array as the given type.
+   *
+   * @param out This is set to a value of the given type, parsed from the JSON. If there is an error, this may not be initialized.
+   * @returns INCORRECT_TYPE If the JSON array is not of the given type.
+   * @returns SUCCESS If the parse succeeded and the out parameter was set to the value.
+   */
+  template <typename T>
+  simdjson_warn_unused simdjson_inline error_code get(T &out)
+     noexcept(nothrow_gettable<T, array>) {
+    static_assert(custom_deserializable<T, array>);
+    return deserialize(*this, out);
+  }
+  /**
+   * Get this array as the given type.
+   *
+   * @returns A value of the given type, parsed from the JSON.
+   * @returns INCORRECT_TYPE If the JSON value is not the given type.
+   */
+  template <typename T>
+  simdjson_inline simdjson_result<T> get()
+    noexcept(nothrow_gettable<T, array>)
+  {
+    static_assert(std::is_default_constructible<T>::value, "The specified type is not default constructible.");
+    T out{};
+    SIMDJSON_TRY(get<T>(out));
+    return out;
+  }
+#endif // SIMDJSON_SUPPORTS_CONCEPTS
 protected:
   /**
    * Go to the end of the array, no matter where you are right now.
    */
-  simdjson_inline error_code consume() noexcept;
+  simdjson_warn_unused simdjson_inline error_code consume() noexcept;
+
+  /**
+   * The recursive step of for_each_at_path_with_wildcard: matches
+   * path[index] at this level and what follows below it.
+   */
+  template <typename Func>
+  inline error_code for_each_at_path_segments(const std::vector<simdjson::internal::json_path_segment> &path, size_t index, Func &callback) noexcept;
 
   /**
    * Begin array iteration.
@@ -158,6 +247,10 @@ protected:
    * iter.is_alive() == false indicates iteration is complete.
    */
   value_iterator iter{};
+#if SIMDJSON_DEVELOPMENT_CHECKS
+  bool locked{false};
+  simdjson_inline void set_locked(bool _locked) noexcept;
+#endif
 
   friend class value;
   friend class document;
@@ -179,15 +272,47 @@ public:
   simdjson_inline simdjson_result(error_code error) noexcept; ///< @private
   simdjson_inline simdjson_result() noexcept = default;
 
-  simdjson_inline simdjson_result<SIMDJSON_IMPLEMENTATION::ondemand::array_iterator> begin() noexcept;
+  simdjson_inline simdjson_result<SIMDJSON_IMPLEMENTATION::ondemand::array_iterator> begin() & noexcept;
+  simdjson_inline simdjson_result<SIMDJSON_IMPLEMENTATION::ondemand::array_iterator> begin() && noexcept;
   simdjson_inline simdjson_result<SIMDJSON_IMPLEMENTATION::ondemand::array_iterator> end() noexcept;
   inline simdjson_result<size_t> count_elements() & noexcept;
   inline simdjson_result<bool> is_empty() & noexcept;
   inline simdjson_result<bool> reset() & noexcept;
   simdjson_inline simdjson_result<SIMDJSON_IMPLEMENTATION::ondemand::value> at(size_t index) noexcept;
   simdjson_inline simdjson_result<SIMDJSON_IMPLEMENTATION::ondemand::value> at_pointer(std::string_view json_pointer) noexcept;
+  simdjson_inline simdjson_result<SIMDJSON_IMPLEMENTATION::ondemand::value> at_path(std::string_view json_path) noexcept;
+#if SIMDJSON_SUPPORTS_CONCEPTS
+  template <typename Func>
+    requires std::invocable<Func, SIMDJSON_IMPLEMENTATION::ondemand::value>
+#else
+  template <typename Func>
+#endif
+  simdjson_inline error_code for_each_at_path_with_wildcard(std::string_view json_path, Func&& callback) noexcept;
   simdjson_inline simdjson_result<std::string_view> raw_json() noexcept;
+#if SIMDJSON_SUPPORTS_CONCEPTS
+  // TODO: move this code into object-inl.h
 
+  template<typename T>
+  simdjson_inline simdjson_result<T> get() noexcept(nothrow_gettable<T, SIMDJSON_IMPLEMENTATION::ondemand::array>) {
+    if (error()) { return error(); }
+    if constexpr (std::is_same_v<T, SIMDJSON_IMPLEMENTATION::ondemand::array>) {
+      return first;
+    }
+    return first.get<T>();
+  }
+  template<typename T>
+  simdjson_warn_unused simdjson_inline error_code get(T& out) noexcept(nothrow_gettable<T, SIMDJSON_IMPLEMENTATION::ondemand::array>) {
+    if (error()) { return error(); }
+    if constexpr (std::is_same_v<T, SIMDJSON_IMPLEMENTATION::ondemand::array>) {
+      out = first;
+    } else {
+      SIMDJSON_TRY( first.get<T>(out) );
+    }
+    return SUCCESS;
+  }
+#endif // SIMDJSON_SUPPORTS_CONCEPTS
 };
 
 } // namespace simdjson
+
+#endif // SIMDJSON_GENERIC_ONDEMAND_ARRAY_H

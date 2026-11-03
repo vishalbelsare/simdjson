@@ -1,10 +1,15 @@
-#include "simdjson/error.h"
+#ifndef SIMDJSON_GENERIC_ONDEMAND_OBJECT_ITERATOR_H
+
+#ifndef SIMDJSON_CONDITIONAL_INCLUDE
+#define SIMDJSON_GENERIC_ONDEMAND_OBJECT_ITERATOR_H
+#include "simdjson/generic/ondemand/base.h"
+#include "simdjson/generic/implementation_simdjson_result_base.h"
+#include "simdjson/generic/ondemand/value_iterator.h"
+#endif // SIMDJSON_CONDITIONAL_INCLUDE
 
 namespace simdjson {
 namespace SIMDJSON_IMPLEMENTATION {
 namespace ondemand {
-
-class field;
 
 class object_iterator {
 public:
@@ -13,7 +18,16 @@ public:
    *
    * Exists so you can declare a variable and later assign to it before use.
    */
-  simdjson_inline object_iterator() noexcept = default;
+  simdjson_inline object_iterator() noexcept {}
+
+#if SIMDJSON_DEVELOPMENT_CHECKS
+   simdjson_inline ~object_iterator() noexcept;
+
+   simdjson_inline object_iterator(object_iterator&&) noexcept;
+   simdjson_inline object_iterator& operator=(object_iterator&&) noexcept;
+   simdjson_inline object_iterator(const object_iterator&) noexcept;
+   simdjson_inline object_iterator& operator=(const object_iterator&) noexcept;
+#endif
 
   //
   // Iterator interface
@@ -27,9 +41,17 @@ public:
   // Assumes it's being compared with the end. true if depth >= iter->depth.
   simdjson_inline bool operator!=(const object_iterator &) const noexcept;
   // Checks for ']' and ','
+  // YOU MUST NOT CALL THIS IF operator* YIELDED AN ERROR.
+  // YOU MUST NOT CALL THIS WITHOUT A CORRESPONDING operator* CALL.
   simdjson_inline object_iterator &operator++() noexcept;
 
 private:
+#if SIMDJSON_DEVELOPMENT_CHECKS
+   bool has_been_referenced{false};
+   object* parent{nullptr};
+
+   simdjson_inline object_iterator(const value_iterator &_iter, object* _parent) noexcept;
+#endif
   /**
    * The underlying JSON iterator.
    *
@@ -71,3 +93,5 @@ public:
 };
 
 } // namespace simdjson
+
+#endif // SIMDJSON_GENERIC_ONDEMAND_OBJECT_ITERATOR_H

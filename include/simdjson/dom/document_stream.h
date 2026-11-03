@@ -1,9 +1,9 @@
 #ifndef SIMDJSON_DOCUMENT_STREAM_H
 #define SIMDJSON_DOCUMENT_STREAM_H
 
-#include "simdjson/common_defs.h"
+#include "simdjson/dom/base.h"
 #include "simdjson/dom/parser.h"
-#include "simdjson/error.h"
+
 #ifdef SIMDJSON_THREADS_ENABLED
 #include <thread>
 #include <mutex>
@@ -12,7 +12,6 @@
 
 namespace simdjson {
 namespace dom {
-
 
 #ifdef SIMDJSON_THREADS_ENABLED
 /** @private Custom worker class **/
@@ -75,7 +74,7 @@ public:
   /**
    * Construct an uninitialized document_stream.
    *
-   *  ```c++
+   *  ```cpp
    *  document_stream docs;
    *  error = parser.parse_many(json).get(docs);
    *  ```
@@ -108,6 +107,22 @@ public:
    *   }
    *   size_t truncated = stream.truncated_bytes();
    *
+   * IMPORTANT: this value is only meaningful under the conditions below. It is
+   * computed from stage-1 bookkeeping, and outside these conditions it is not
+   * merely imprecise, it is
+   * arbitrary -- it can exceed size_in_bytes() or wrap around to a huge value.
+   * Check it only when all of the following hold:
+   *
+   *   - you iterated all the way to the end of the stream;
+   *   - no document reported an error. Iteration stops at the first failed
+   *     document, which can leave the bookkeeping from a mid-stream batch.
+   *
+   * If you need to know about a truncated tail outside those conditions, track
+   * it yourself from the last successful document (see iterator::current_index()
+   * and iterator::source()).
+   *
+   * An empty input (zero bytes) or an input made only of white space contains
+   * no document: truncated_bytes() returns zero.
    */
   inline size_t truncated_bytes() const noexcept;
   /**
@@ -207,12 +222,14 @@ private:
    * @param buf is the raw byte buffer we need to process
    * @param len is the length of the raw byte buffer in bytes
    * @param batch_size is the size of the windows (must be strictly greater or equal to the largest JSON document)
+   * @param format is the stream format
    */
   simdjson_inline document_stream(
     dom::parser &parser,
     const uint8_t *buf,
     size_t len,
-    size_t batch_size
+    size_t batch_size,
+    stream_format format = stream_format::whitespace_delimited
   ) noexcept;
 
   /**
@@ -225,8 +242,7 @@ private:
    * Parse the next document found in the buffer previously given to document_stream.
    *
    * The content should be a valid JSON document encoded as UTF-8. If there is a
-   * UTF-8 BOM, the caller is responsible for omitting it, UTF-8 BOM are
-   * discouraged.
+   * UTF-8 BOM, the parser skips it.
    *
    * You do NOT need to pre-allocate a parser.  This function takes care of
    * pre-allocating a capacity defined by the batch_size defined when creating the
@@ -259,14 +275,21 @@ private:
   /** Pass the next batch through stage 1 with the given parser. */
   inline error_code run_stage1(dom::parser &p, size_t batch_start) noexcept;
 
+  /** Pick the stage 2 entry point for the batch that stage 1 just indexed. */
+  inline void load_stage2() noexcept;
+
   dom::parser *parser;
   const uint8_t *buf;
   size_t len;
   size_t batch_size;
+  /** The stream format. */
+  stream_format format;
   /** The error (or lack thereof) from the current document. */
   error_code error;
   size_t batch_start{0};
   size_t doc_index{};
+  /** The stage 2 entry point for the documents of the current batch (see load_stage2). */
+  internal::dom_parser_implementation::stage2_next_function_t stage2_next_fn{nullptr};
 #ifdef SIMDJSON_THREADS_ENABLED
   /** Indicates whether we use threads. Note that this needs to be a constant during the execution of the parsing. */
   bool use_thread;

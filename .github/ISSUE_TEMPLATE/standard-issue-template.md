@@ -9,7 +9,8 @@ assignees: ''
 
 Before submitting an issue, please ensure that you have read the documentation:
 
-* Basics is an overview of how to use simdjson and its APIs: https://github.com/simdjson/simdjson/blob/master/doc/basics.md
+* Basics is an overview of how to use simdjson and its APIs to parse JSON: https://github.com/simdjson/simdjson/blob/master/doc/basics.md
+* Builder is an overview of how to use simdjson to generate JSON: https://github.com/simdjson/simdjson/blob/master/doc/builder.md
 * Performance shows some more advanced scenarios and how to tune for them: https://github.com/simdjson/simdjson/blob/master/doc/performance.md
 * Contributing: https://github.com/simdjson/simdjson/blob/master/CONTRIBUTING.md
 * We follow the [JSON specification as described by RFC 8259](https://www.rfc-editor.org/rfc/rfc8259.txt) (T. Bray, 2017).
@@ -18,7 +19,7 @@ We do not make changes to simdjson without clearly identifiable benefits, which 
 
 Is your issue:
 
-1. A bug report? If so, please point at a reproducible test. Indicate whether you are willing or able to provide a bug fix as a pull request.
+1. A bug report? If so, please point at a reproducible test. Indicate whether you are willing or able to provide a bug fix as a pull request. As a matter of policy, we do not consider a compiler warning to be a bug.
 
 2. A build issue? If so, provide all possible details regarding your system configuration. If we cannot reproduce your issue, we cannot fix it.
 

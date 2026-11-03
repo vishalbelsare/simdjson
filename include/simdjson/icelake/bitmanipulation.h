@@ -1,8 +1,13 @@
 #ifndef SIMDJSON_ICELAKE_BITMANIPULATION_H
 #define SIMDJSON_ICELAKE_BITMANIPULATION_H
 
+#ifndef SIMDJSON_CONDITIONAL_INCLUDE
+#include "simdjson/icelake/base.h"
+#include "simdjson/icelake/intrinsics.h"
+#endif // SIMDJSON_CONDITIONAL_INCLUDE
+
 namespace simdjson {
-namespace SIMDJSON_IMPLEMENTATION {
+namespace icelake {
 namespace {
 
 // We sometimes call trailing_zero on inputs that are zero,
@@ -47,19 +52,9 @@ simdjson_inline long long int count_ones(uint64_t input_num) {
 }
 #endif
 
-simdjson_inline bool add_overflow(uint64_t value1, uint64_t value2,
-                                uint64_t *result) {
-#if SIMDJSON_REGULAR_VISUAL_STUDIO
-  return _addcarry_u64(0, value1, value2,
-                       reinterpret_cast<unsigned __int64 *>(result));
-#else
-  return __builtin_uaddll_overflow(value1, value2,
-                                   reinterpret_cast<unsigned long long *>(result));
-#endif
-}
 
 } // unnamed namespace
-} // namespace SIMDJSON_IMPLEMENTATION
+} // namespace icelake
 } // namespace simdjson
 
 #endif // SIMDJSON_ICELAKE_BITMANIPULATION_H

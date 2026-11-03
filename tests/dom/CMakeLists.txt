@@ -7,16 +7,24 @@ if(NOT SIMDJSON_LEGACY_VISUAL_STUDIO AND NOT SIMDJSON_WINDOWS_DLL)
 endif()
 add_cpp_test(basictests                 LABELS dom acceptance per_implementation)
 add_cpp_test(document_stream_tests      LABELS dom acceptance per_implementation)
-add_cpp_test(document_tests             LABELS dom acceptance per_implementation)
+add_cpp_test(document_stream_fuzz_tests LABELS dom acceptance per_implementation)
+add_cpp_test(document_tests             NEEDS_DATA LABELS dom acceptance per_implementation)
+add_cpp_test(unpadded_tests             LABELS dom acceptance per_implementation)
+add_cpp_test(padding_contents_tests     LABELS dom acceptance per_implementation)
 add_cpp_test(errortests                 LABELS dom acceptance per_implementation)
 add_cpp_test(extracting_values_example  LABELS dom acceptance per_implementation)
 add_cpp_test(integer_tests              LABELS dom acceptance per_implementation)
-add_cpp_test(jsoncheck                  LABELS dom acceptance per_implementation)
-add_cpp_test(minefieldcheck             LABELS dom acceptance per_implementation)
-add_cpp_test(numberparsingcheck         LABELS dom acceptance per_implementation) # https://tools.ietf.org/html/rfc6901
-add_cpp_test(parse_many_test            LABELS dom acceptance per_implementation)
+add_cpp_test(big_integer_tests          LABELS dom acceptance per_implementation)
+add_cpp_test(nan_inf_tests              LABELS dom acceptance per_implementation)
+add_cpp_test(locale_independence_tests  LABELS dom acceptance per_implementation)
+add_cpp_test(jsoncheck                  NEEDS_DATA LABELS dom acceptance per_implementation)
+add_cpp_test(json_path_tests            LABELS dom acceptance per_implementation)
+add_cpp_test(array_reverse_tests        LABELS dom acceptance per_implementation)
+add_cpp_test(minefieldcheck             NEEDS_DATA LABELS dom acceptance per_implementation)
+add_cpp_test(numberparsingcheck         NEEDS_DATA LABELS dom acceptance per_implementation) # https://tools.ietf.org/html/rfc6901
+add_cpp_test(parse_many_test            NEEDS_DATA LABELS dom acceptance per_implementation)
 add_cpp_test(pointercheck               LABELS dom acceptance per_implementation) # https://tools.ietf.org/html/rfc6901
-add_cpp_test(stringparsingcheck         LABELS dom acceptance per_implementation) # https://tools.ietf.org/html/rfc6901
+add_cpp_test(stringparsingcheck         NEEDS_DATA LABELS dom acceptance per_implementation) # https://tools.ietf.org/html/rfc6901
 add_cpp_test(trivially_copyable_test    LABELS dom acceptance per_implementation)
 
 
@@ -78,14 +86,16 @@ if (BASH AND (NOT WIN32) AND SIMDJSON_BASH AND (TARGET json2json)) # The scripts
         $<TARGET_FILE:checkimplementation>
     )
   endif()
-  add_test(
-    NAME simdjson_force_implementation_error
-    COMMAND
-      ${CMAKE_COMMAND} -E env
-      SIMDJSON_FORCE_IMPLEMENTATION=doesnotexist
-      $<TARGET_FILE:json2json> ${EXAMPLE_JSON}
-  )
-  set_tests_properties(simdjson_force_implementation_error PROPERTIES WILL_FAIL TRUE)
+  if((CMAKE_HOST_SYSTEM_PROCESSOR STREQUAL x86_64 OR CMAKE_HOST_SYSTEM_PROCESSOR STREQUAL amd64) AND NOT DEFINED CMAKE_CROSSCOMPILING_EMULATOR)
+    add_test(
+      NAME simdjson_force_implementation_error
+      COMMAND
+        ${CMAKE_COMMAND} -E env
+        SIMDJSON_FORCE_IMPLEMENTATION=doesnotexist
+        $<TARGET_FILE:json2json> ${EXAMPLE_JSON}
+    )
+    set_tests_properties(simdjson_force_implementation_error PROPERTIES WILL_FAIL TRUE)
+  endif()
 endif()
 
 #
@@ -96,22 +106,47 @@ endif()
 if(NOT (MSVC AND MSVC_VERSION LESS 1920))
   if(SIMDJSON_EXCEPTIONS)
     add_cpp_test(readme_examples COMPILE_ONLY LABELS acceptance)
-    add_cpp_test(readme_examples11 COMPILE_ONLY LABELS acceptance SOURCES readme_examples.cpp)
-    set_target_properties(readme_examples11 PROPERTIES CXX_STANDARD 11 CXX_STANDARD_REQUIRED ON CXX_EXTENSIONS OFF)
+    if(NOT SIMDJSON_STATIC_REFLECTION_ENABLED)
+      add_cpp_test(readme_examples11 COMPILE_ONLY LABELS acceptance SOURCES readme_examples.cpp)
+      set_target_properties(readme_examples11 PROPERTIES CXX_STANDARD 11 CXX_STANDARD_REQUIRED ON CXX_EXTENSIONS OFF)
+    endif(NOT SIMDJSON_STATIC_REFLECTION_ENABLED)
   endif()
 
   add_cpp_test(readme_examples_noexceptions COMPILE_ONLY LABELS acceptance)
 
-  add_cpp_test(readme_examples_noexceptions11 COMPILE_ONLY LABELS acceptance SOURCES readme_examples_noexceptions.cpp)
-  set_target_properties(readme_examples_noexceptions11 PROPERTIES CXX_STANDARD 11 CXX_STANDARD_REQUIRED ON CXX_EXTENSIONS OFF)
+  if(NOT SIMDJSON_STATIC_REFLECTION_ENABLED)
+    add_cpp_test(readme_examples_noexceptions11 COMPILE_ONLY LABELS acceptance SOURCES readme_examples_noexceptions.cpp)
+    set_target_properties(readme_examples_noexceptions11 PROPERTIES CXX_STANDARD 11 CXX_STANDARD_REQUIRED ON CXX_EXTENSIONS OFF)
+  endif(NOT SIMDJSON_STATIC_REFLECTION_ENABLED)
 
   # Compile tests that *should fail*
   add_cpp_test(readme_examples_will_fail_with_exceptions_off WILL_FAIL COMPILE_ONLY LABELS acceptance SOURCES readme_examples.cpp)
   target_compile_definitions(readme_examples_will_fail_with_exceptions_off PRIVATE SIMDJSON_EXCEPTIONS=0)
 endif()
 
+#
+# Test C++20 features
+#
 
-if(MSVC AND BUILD_SHARED_LIBS)
+# Add the tests if we're on:
+#   1. Visual Studio 2022 v17.6 or later
+#   2. GCC v14.0.0 or later (GCC v13.0.0 cannot handle pipe operator of lambda)
+#   3. Clang v15.0.0 or later (certain version C++ headers occur error when compiling)
+#   4. or if we are targeting C++20 or better
+if(
+  (MSVC AND MSVC_VERSION GREATER_EQUAL 1930) OR
+  (CMAKE_CXX_COMPILER_ID STREQUAL "GNU" AND CMAKE_CXX_COMPILER_VERSION VERSION_GREATER_EQUAL "14.0.0") OR
+  (CMAKE_CXX_COMPILER_ID MATCHES "Clang" AND CMAKE_CXX_COMPILER_VERSION VERSION_GREATER_EQUAL "15.0.0") OR
+  (CMAKE_CXX_STANDARD GREATER_EQUAL 20)
+  )
+  message(STATUS "compiler id: ${CMAKE_CXX_COMPILER_ID} version: ${CMAKE_CXX_COMPILER_VERSION}")
+  add_cpp_test(ranges_test LABELS dom acceptance per_implementation)
+  if(NOT SIMDJSON_STATIC_REFLECTION_ENABLED AND NOT CMAKE_CXX_STANDARD GREATER_EQUAL 20)
+     set_target_properties(ranges_test PROPERTIES CXX_STANDARD 20 CXX_STANDARD_REQUIRED ON CXX_EXTENSIONS OFF)
+  endif()
+endif()
+
+if(WIN32 AND BUILD_SHARED_LIBS)
   add_custom_command(TARGET basictests POST_BUILD        # Adds a post-build event
     COMMAND ${CMAKE_COMMAND} -E copy_if_different  # which executes "cmake -E copy_if_different..."
         "$<TARGET_FILE:simdjson>"      # <--this is in-file

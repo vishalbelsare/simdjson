@@ -80,7 +80,7 @@ namespace scalar_tests {
     }
 
     {
-      padded_string array_json = std::string("[") + std::string(json) + "]";
+      padded_string array_json = "["s + std::string(json) + "]";
       std::cout << "- JSON: " << array_json << endl;
       SUBTEST( "simdjson_result<value>", test_ondemand_doc(array_json, [&](auto doc_result) {
         int count = 0;
@@ -123,7 +123,7 @@ namespace scalar_tests {
     }
 
     {
-      padded_string whitespace_array_json = std::string("[") + std::string(json) + " ]";
+      padded_string whitespace_array_json = "["s + std::string(json) + " ]";
       std::cout << "- JSON: " << whitespace_array_json << endl;
 
       SUBTEST( "simdjson_result<value>", test_ondemand_doc(whitespace_array_json, [&](auto doc_result) {
@@ -256,7 +256,7 @@ namespace scalar_tests {
       ASSERT_EQUAL( expected, T(doc) );
       return true;
     }));
-    padded_string array_json = std::string("[") + std::string(json) + "]";
+    padded_string array_json = "["s + std::string(json) + "]";
     std::cout << "- JSON: " << array_json << endl;
     SUBTEST( "value", test_ondemand_doc(array_json, [&](auto doc_result) {
       int count = 0;
@@ -369,15 +369,24 @@ namespace scalar_tests {
     ondemand::parser parser;
     ondemand::document doc;
     ASSERT_SUCCESS(parser.iterate(json).get(doc));
-    bool x;
-    ASSERT_SUCCESS(doc.is_null().get(x));
-    ASSERT_TRUE(!x);
+    ASSERT_ERROR(doc.is_null(), INCORRECT_TYPE);
+    TEST_SUCCEED();
+  }
+
+  bool nul() {
+    TEST_START();
+    auto json = R"( nul )"_padded;
+    ondemand::parser parser;
+    ondemand::document doc;
+    ASSERT_SUCCESS(parser.iterate(json).get(doc));
+    ASSERT_ERROR(doc.is_null(), INCORRECT_TYPE);
     TEST_SUCCEED();
   }
 
   bool run() {
     return
            nully() &&
+           nul() &&
            string_with_trailing() &&
            uint64_with_trailing() &&
            int64_with_trailing() &&

@@ -1,8 +1,18 @@
+#ifndef SIMDJSON_GENERIC_ONDEMAND_FIELD_INL_H
+
+#ifndef SIMDJSON_CONDITIONAL_INCLUDE
+#define SIMDJSON_GENERIC_ONDEMAND_FIELD_INL_H
+#include "simdjson/generic/ondemand/base.h"
+#include "simdjson/generic/ondemand/field.h"
+#include "simdjson/generic/ondemand/value-inl.h"
+#include "simdjson/generic/ondemand/value_iterator-inl.h"
+#endif // SIMDJSON_CONDITIONAL_INCLUDE
+
 namespace simdjson {
 namespace SIMDJSON_IMPLEMENTATION {
 namespace ondemand {
 
-// clang 6 doesn't think the default constructor can be noexcept, so we make it explicit
+// clang 6 does not think the default constructor can be noexcept, so we make it explicit
 simdjson_inline field::field() noexcept : std::pair<raw_json_string, ondemand::value>() {}
 
 simdjson_inline field::field(raw_json_string key, ondemand::value &&value) noexcept
@@ -28,10 +38,47 @@ simdjson_inline simdjson_warn_unused simdjson_result<std::string_view> field::un
   return answer;
 }
 
+#if SIMDJSON_SUPPORTS_CHAR8_T
+simdjson_inline simdjson_warn_unused simdjson_result<std::u8string_view> field::unescaped_u8key(bool allow_replacement) noexcept {
+  std::string_view key;
+  SIMDJSON_TRY( unescaped_key(allow_replacement).get(key) );
+  return internal::as_u8string_view(key);
+}
+#endif // SIMDJSON_SUPPORTS_CHAR8_T
+
+template <typename string_type>
+simdjson_inline simdjson_warn_unused error_code field::unescaped_key(string_type& receiver, bool allow_replacement) noexcept {
+  std::string_view key;
+  SIMDJSON_TRY( unescaped_key(allow_replacement).get(key) );
+  internal::assign_utf8(receiver, key);
+  return SUCCESS;
+}
+
 simdjson_inline raw_json_string field::key() const noexcept {
   SIMDJSON_ASSUME(first.buf != nullptr); // We would like to call .alive() by Visual Studio won't let us.
   return first;
 }
+
+
+simdjson_inline std::string_view field::key_raw_json_token() const noexcept {
+  SIMDJSON_ASSUME(first.buf != nullptr); // We would like to call .alive() by Visual Studio won't let us.
+  // The ':' is the token just before the value. Use the value's start position
+  // rather than the current position, which moves once the value is consumed.
+  return std::string_view(reinterpret_cast<const char*>(first.buf-1), second.iter._json_iter->token.peek(second.iter.start_position() - 1) - first.buf + 1);
+}
+
+simdjson_inline std::string_view field::escaped_key() const noexcept {
+  SIMDJSON_ASSUME(first.buf != nullptr); // We would like to call .alive() by Visual Studio won't let us.
+  auto end_quote = second.iter._json_iter->token.peek(second.iter.start_position() - 1);
+  while(*end_quote != '"') end_quote--;
+  return std::string_view(reinterpret_cast<const char*>(first.buf), end_quote - first.buf);
+}
+
+#if SIMDJSON_SUPPORTS_CHAR8_T
+simdjson_inline std::u8string_view field::escaped_u8key() const noexcept {
+  return internal::as_u8string_view(escaped_key());
+}
+#endif // SIMDJSON_SUPPORTS_CHAR8_T
 
 simdjson_inline value &field::value() & noexcept {
   return second;
@@ -66,13 +113,47 @@ simdjson_inline simdjson_result<SIMDJSON_IMPLEMENTATION::ondemand::raw_json_stri
   if (error()) { return error(); }
   return first.key();
 }
+
+simdjson_inline simdjson_result<std::string_view> simdjson_result<SIMDJSON_IMPLEMENTATION::ondemand::field>::key_raw_json_token() noexcept {
+  if (error()) { return error(); }
+  return first.key_raw_json_token();
+}
+
+simdjson_inline simdjson_result<std::string_view> simdjson_result<SIMDJSON_IMPLEMENTATION::ondemand::field>::escaped_key() noexcept {
+  if (error()) { return error(); }
+  return first.escaped_key();
+}
+
+#if SIMDJSON_SUPPORTS_CHAR8_T
+simdjson_inline simdjson_result<std::u8string_view> simdjson_result<SIMDJSON_IMPLEMENTATION::ondemand::field>::escaped_u8key() noexcept {
+  if (error()) { return error(); }
+  return first.escaped_u8key();
+}
+#endif // SIMDJSON_SUPPORTS_CHAR8_T
+
 simdjson_inline simdjson_result<std::string_view> simdjson_result<SIMDJSON_IMPLEMENTATION::ondemand::field>::unescaped_key(bool allow_replacement) noexcept {
   if (error()) { return error(); }
   return first.unescaped_key(allow_replacement);
 }
+
+#if SIMDJSON_SUPPORTS_CHAR8_T
+simdjson_inline simdjson_result<std::u8string_view> simdjson_result<SIMDJSON_IMPLEMENTATION::ondemand::field>::unescaped_u8key(bool allow_replacement) noexcept {
+  if (error()) { return error(); }
+  return first.unescaped_u8key(allow_replacement);
+}
+#endif // SIMDJSON_SUPPORTS_CHAR8_T
+
+template<typename string_type>
+simdjson_warn_unused simdjson_inline error_code simdjson_result<SIMDJSON_IMPLEMENTATION::ondemand::field>::unescaped_key(string_type &receiver, bool allow_replacement) noexcept {
+  if (error()) { return error(); }
+  return first.unescaped_key(receiver, allow_replacement);
+}
+
 simdjson_inline simdjson_result<SIMDJSON_IMPLEMENTATION::ondemand::value> simdjson_result<SIMDJSON_IMPLEMENTATION::ondemand::field>::value() noexcept {
   if (error()) { return error(); }
   return std::move(first.value());
 }
 
 } // namespace simdjson
+
+#endif // SIMDJSON_GENERIC_ONDEMAND_FIELD_INL_H

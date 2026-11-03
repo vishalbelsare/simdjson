@@ -12,7 +12,7 @@
 #define NONSTD_SV_LITE_H_INCLUDED
 
 #define string_view_lite_MAJOR  1
-#define string_view_lite_MINOR  7
+#define string_view_lite_MINOR  8
 #define string_view_lite_PATCH  0
 
 #define string_view_lite_VERSION  nssv_STRINGIFY(string_view_lite_MAJOR) "." nssv_STRINGIFY(string_view_lite_MINOR) "." nssv_STRINGIFY(string_view_lite_PATCH)
@@ -67,6 +67,10 @@
 
 #ifndef  nssv_CONFIG_NO_STREAM_INSERTION
 # define nssv_CONFIG_NO_STREAM_INSERTION  0
+#endif
+
+#ifndef  nssv_CONFIG_CONSTEXPR11_STD_SEARCH
+# define nssv_CONFIG_CONSTEXPR11_STD_SEARCH  1
 #endif
 
 // Control presence of exception handling (try and auto discover):
@@ -130,6 +134,8 @@
 
 #if nssv_CONFIG_CONVERSION_STD_STRING_FREE_FUNCTIONS
 
+#include <string>
+
 namespace nonstd {
 
 template< class CharT, class Traits, class Allocator = std::allocator<CharT> >
@@ -160,22 +166,22 @@ inline namespace literals {
 inline namespace string_view_literals {
 
 
-constexpr std::string_view operator "" _sv( const char* str, size_t len ) noexcept  // (1)
+constexpr std::string_view operator ""_sv( const char* str, size_t len ) noexcept  // (1)
 {
     return std::string_view{ str, len };
 }
 
-constexpr std::u16string_view operator "" _sv( const char16_t* str, size_t len ) noexcept  // (2)
+constexpr std::u16string_view operator ""_sv( const char16_t* str, size_t len ) noexcept  // (2)
 {
     return std::u16string_view{ str, len };
 }
 
-constexpr std::u32string_view operator "" _sv( const char32_t* str, size_t len ) noexcept  // (3)
+constexpr std::u32string_view operator ""_sv( const char32_t* str, size_t len ) noexcept  // (3)
 {
     return std::u32string_view{ str, len };
 }
 
-constexpr std::wstring_view operator "" _sv( const wchar_t* str, size_t len ) noexcept  // (4)
+constexpr std::wstring_view operator ""_sv( const wchar_t* str, size_t len ) noexcept  // (4)
 {
     return std::wstring_view{ str, len };
 }
@@ -267,7 +273,7 @@ using std::operator<<;
 # define nssv_HAS_CPP0X  0
 #endif
 
-// Unless defined otherwise below, consider VC14 as C++11 for variant-lite:
+// Unless defined otherwise below, consider VC14 as C++11 for string-view-lite:
 
 #if nssv_COMPILER_MSVC_VER >= 1900
 # undef  nssv_CPP11_OR_GREATER
@@ -403,9 +409,9 @@ using std::operator<<;
 #endif
 
 #if nssv_HAVE_NODISCARD
-# define nssv_nodiscard  [[nodiscard]]
+# define nssv_nodiscard  simdjson_warn_unused
 #else
-# define nssv_nodiscard  /*[[nodiscard]]*/
+# define nssv_nodiscard  /*simdjson_warn_unused*/
 #endif
 
 // Additional includes:
@@ -434,9 +440,9 @@ using std::operator<<;
 # pragma clang diagnostic ignored "-Wreserved-user-defined-literal"
 # pragma clang diagnostic push
 # pragma clang diagnostic ignored "-Wuser-defined-literals"
-#elif defined(__GNUC__)
-# pragma  GCC  diagnostic push
-# pragma  GCC  diagnostic ignored "-Wliteral-suffix"
+#elif nssv_COMPILER_GNUC_VERSION >= 480
+#  pragma  GCC  diagnostic push
+#  pragma  GCC  diagnostic ignored "-Wliteral-suffix"
 #endif // __clang__
 
 #if nssv_COMPILER_MSVC_VERSION >= 140
@@ -451,8 +457,8 @@ using std::operator<<;
 
 #if defined(__clang__)
 # define nssv_RESTORE_WARNINGS()  _Pragma("clang diagnostic pop")
-#elif defined(__GNUC__)
-# define nssv_RESTORE_WARNINGS()  _Pragma("GCC diagnostic pop")
+#elif nssv_COMPILER_GNUC_VERSION >= 480
+#  define nssv_RESTORE_WARNINGS()  _Pragma("GCC diagnostic pop")
 #elif nssv_COMPILER_MSVC_VERSION >= 140
 # define nssv_RESTORE_WARNINGS()  __pragma(warning(pop ))
 #else
@@ -567,11 +573,30 @@ constexpr const CharT* search( basic_string_view<CharT, Traits> haystack, basic_
 
 // non-recursive:
 
+#if nssv_CONFIG_CONSTEXPR11_STD_SEARCH
+
 template< class CharT, class Traits = std::char_traits<CharT> >
 constexpr const CharT* search( basic_string_view<CharT, Traits> haystack, basic_string_view<CharT, Traits> needle )
 {
     return std::search( haystack.begin(), haystack.end(), needle.begin(), needle.end() );
 }
+
+#else // nssv_CONFIG_CONSTEXPR11_STD_SEARCH
+
+template< class CharT, class Traits = std::char_traits<CharT> >
+nssv_constexpr14 const CharT* search( basic_string_view<CharT, Traits> haystack, basic_string_view<CharT, Traits> needle )
+{
+    while ( needle.size() <= haystack.size() )
+    {
+        if  ( haystack.starts_with(needle) )
+        {
+            return haystack.cbegin();
+        }
+        haystack = basic_string_view<CharT, Traits>{ haystack.begin() + 1, haystack.size() - 1U };
+    }
+    return haystack.cend();
+}
+#endif // nssv_CONFIG_CONSTEXPR11_STD_SEARCH
 
 #endif // OPTIMIZE
 #endif // nssv_CPP11_OR_GREATER && ! nssv_CPP17_OR_GREATER
@@ -845,7 +870,7 @@ public:
 
     // find(), 4x:
 
-    nssv_constexpr size_type find( basic_string_view v, size_type pos = 0 ) const nssv_noexcept  // (1)
+    nssv_constexpr14 size_type find( basic_string_view v, size_type pos = 0 ) const nssv_noexcept  // (1)
     {
         return assert( v.size() == 0 || v.data() != nssv_nullptr )
             , pos >= size()
@@ -1487,22 +1512,22 @@ nssv_inline_ns namespace string_view_literals {
 
 #if nssv_CONFIG_STD_SV_OPERATOR && nssv_HAVE_STD_DEFINED_LITERALS
 
-nssv_constexpr nonstd::sv_lite::string_view operator "" sv( const char* str, size_t len ) nssv_noexcept  // (1)
+nssv_constexpr nonstd::sv_lite::string_view operator ""sv( const char* str, size_t len ) nssv_noexcept  // (1)
 {
     return nonstd::sv_lite::string_view{ str, len };
 }
 
-nssv_constexpr nonstd::sv_lite::u16string_view operator "" sv( const char16_t* str, size_t len ) nssv_noexcept  // (2)
+nssv_constexpr nonstd::sv_lite::u16string_view operator ""sv( const char16_t* str, size_t len ) nssv_noexcept  // (2)
 {
     return nonstd::sv_lite::u16string_view{ str, len };
 }
 
-nssv_constexpr nonstd::sv_lite::u32string_view operator "" sv( const char32_t* str, size_t len ) nssv_noexcept  // (3)
+nssv_constexpr nonstd::sv_lite::u32string_view operator ""sv( const char32_t* str, size_t len ) nssv_noexcept  // (3)
 {
     return nonstd::sv_lite::u32string_view{ str, len };
 }
 
-nssv_constexpr nonstd::sv_lite::wstring_view operator "" sv( const wchar_t* str, size_t len ) nssv_noexcept  // (4)
+nssv_constexpr nonstd::sv_lite::wstring_view operator ""sv( const wchar_t* str, size_t len ) nssv_noexcept  // (4)
 {
     return nonstd::sv_lite::wstring_view{ str, len };
 }
@@ -1511,22 +1536,22 @@ nssv_constexpr nonstd::sv_lite::wstring_view operator "" sv( const wchar_t* str,
 
 #if nssv_CONFIG_USR_SV_OPERATOR
 
-nssv_constexpr nonstd::sv_lite::string_view operator "" _sv( const char* str, size_t len ) nssv_noexcept  // (1)
+nssv_constexpr nonstd::sv_lite::string_view operator ""_sv( const char* str, size_t len ) nssv_noexcept  // (1)
 {
     return nonstd::sv_lite::string_view{ str, len };
 }
 
-nssv_constexpr nonstd::sv_lite::u16string_view operator "" _sv( const char16_t* str, size_t len ) nssv_noexcept  // (2)
+nssv_constexpr nonstd::sv_lite::u16string_view operator ""_sv( const char16_t* str, size_t len ) nssv_noexcept  // (2)
 {
     return nonstd::sv_lite::u16string_view{ str, len };
 }
 
-nssv_constexpr nonstd::sv_lite::u32string_view operator "" _sv( const char32_t* str, size_t len ) nssv_noexcept  // (3)
+nssv_constexpr nonstd::sv_lite::u32string_view operator ""_sv( const char32_t* str, size_t len ) nssv_noexcept  // (3)
 {
     return nonstd::sv_lite::u32string_view{ str, len };
 }
 
-nssv_constexpr nonstd::sv_lite::wstring_view operator "" _sv( const wchar_t* str, size_t len ) nssv_noexcept  // (4)
+nssv_constexpr nonstd::sv_lite::wstring_view operator ""_sv( const wchar_t* str, size_t len ) nssv_noexcept  // (4)
 {
     return nonstd::sv_lite::wstring_view{ str, len };
 }

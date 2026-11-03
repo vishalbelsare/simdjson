@@ -18,6 +18,7 @@ Contents
 - [How it works](#how-it-works)
 - [Support](#support)
 - [API](#api)
+- [Streaming directly from a memory-mapped file](#streaming-directly-from-a-memory-mapped-file)
 - [Use cases](#use-cases)
 - [Tracking your position](#tracking-your-position)
 - [Incomplete streams](#incomplete-streams)
@@ -103,7 +104,12 @@ cases, remove almost entirely its cost and replaces it by the overhead of a thre
 of magnitude cheaper. Ain't that awesome!
 
 Thread support is only active if thread supported is detected in which case the macro
-SIMDJSON_THREADS_ENABLED is set. Otherwise the library runs in  single-thread mode.
+SIMDJSON_THREADS_ENABLED is set.  You can also manually pass `SIMDJSON_THREADS_ENABLED=1` flag
+to the library. Otherwise the library runs in single-thread mode.
+
+You should be consistent. If you link against the simdjson library built for multithreading
+(i.e., with `SIMDJSON_THREADS_ENABLED`), then you should build your application with multithreading
+system (setting `SIMDJSON_THREADS_ENABLED=1` and linking against a thread library).
 
 A `document_stream` instance uses at most two threads: there is a main thread and a worker thread.
 You should expect the main thread to be fully occupied while the worker thread is partially busy
@@ -125,9 +131,9 @@ Whitespace Characters:
 - **Nothing**
 
 Some official formats **(non-exhaustive list)**:
-- [Newline-Delimited JSON (NDJSON)](http://ndjson.org/)
+- [Newline-Delimited JSON (NDJSON)](https://github.com/ndjson/ndjson-spec)
 - [JSON lines (JSONL)](http://jsonlines.org/)
-- [Record separator-delimited JSON (RFC 7464)](https://tools.ietf.org/html/rfc7464) <- Not supported by JsonStream!
+- [Record separator-delimited JSON (RFC 7464)](https://tools.ietf.org/html/rfc7464)
 - [More on Wikipedia...](https://en.wikipedia.org/wiki/JSON_streaming)
 
 API
@@ -179,17 +185,17 @@ You may also call the `source()` method to get a `std::string_view` instance on 
 Let us illustrate the idea with code:
 
 
-```C++
+```cpp
     auto json = R"([1,2,3]  {"1":1,"2":3,"4":4} [1,2,3]  )"_padded;
     simdjson::dom::parser parser;
     simdjson::dom::document_stream stream;
     auto error = parser.parse_many(json).get(stream);
-    if( error ) { /* do something */ }
+    if (error) { /* do something */ }
     auto i = stream.begin();
     size_t count{0};
     for(; i != stream.end(); ++i) {
         auto doc = *i;
-        if(!doc.error()) {
+        if (!doc.error()) {
           std::cout << "got full document at " << i.current_index() << std::endl;
           std::cout << i.source() << std::endl;
           count++;
@@ -212,6 +218,86 @@ got full document at 29
 ```
 
 
+
+Streaming directly from a memory-mapped file
+--------------------------------------------
+
+When your input is a large NDJSON / JSON-lines file on disk, the most
+efficient way to feed `parse_many` is to use `simdjson::padded_memory_map`.
+It returns a `padded_string_view` with the right amount of trailing padding,
+so you can pass it directly to `parse_many` without copying the file content
+into your own buffer first.
+
+`padded_memory_map` is available on POSIX systems (Linux, macOS, BSD, ...) by
+default. On Windows it is an **opt-in** feature with the following
+requirements:
+
+1. Build simdjson with `-DSIMDJSON_ENABLE_MEMORY_FILE_MAPPING_ON_WINDOWS=ON`, or — if
+   you consume simdjson as a pre-built library — define
+   `SIMDJSON_ENABLE_MEMORY_FILE_MAPPING_ON_WINDOWS=1`, raise `NTDDI_VERSION` to at
+   least `NTDDI_WIN10_RS4` (`0x0A000005`, Windows 10 version 1803), and
+   add `onecore.lib` to your link line yourself. The Windows
+   implementation uses the modern memory APIs `CreateFileMapping2` /
+   `MapViewOfFile3`, which are available starting with that version of
+   Windows and are exported by `onecore.lib`.
+2. `#include <windows.h>` before `#include "simdjson.h"` in every
+   translation unit where you want to use `padded_memory_map`. simdjson
+   deliberately does not pull in `<windows.h>` itself, so the class is
+   only declared when the Win32 types are already visible.
+
+If either requirement is not met on Windows, the `padded_memory_map` class is
+not declared at all and any code that references it fails to compile with an
+"unknown identifier" error. The availability of the class can be tested with
+the macro `SIMDJSON_HAS_PADDED_MEMORY_MAP`.
+
+On POSIX, `padded_memory_map` uses `mmap` to map the file directly into
+memory with zero copies. On Windows (when enabled), it uses
+`CreateFileMapping2` + `MapViewOfFile3` for true zero-copy mapping
+whenever the file does not end within `SIMDJSON_PADDING` bytes of a page
+boundary; for those rare cases, it transparently falls back to reading
+the file into a heap-allocated padded buffer so that the returned view
+always has `SIMDJSON_PADDING` accessible zero bytes after the file content.
+
+```cpp
+#ifdef _WIN32
+#include <windows.h> // Must come BEFORE <simdjson.h> on Windows
+#endif
+#include "simdjson.h"
+
+// ...
+
+simdjson::padded_memory_map map("huge_stream.ndjson");
+if (!map.is_valid()) { /* file missing, unreadable, too large, ... */ return; }
+
+simdjson::dom::parser parser;
+simdjson::dom::document_stream stream;
+auto error = parser.parse_many(map.view()).get(stream);
+if (error) { std::cerr << error << std::endl; return; }
+
+for (auto doc : stream) {
+  // process each JSON document in the stream
+  std::cout << doc << std::endl;
+}
+```
+
+Important lifetime rule: the `padded_string_view` returned by `map.view()` is
+only valid while the `padded_memory_map` instance is alive, so keep `map`
+alive for as long as you are iterating the stream.
+
+The file must not be modified while the memory map is in use. If you need a
+fully independent copy of the data, use `simdjson::padded_string::load(...)`
+instead.
+
+If you prefer single-document parsing on a memory-mapped file, the same
+pattern applies to `parser.parse(...)`:
+
+```cpp
+simdjson::padded_memory_map map(myfilename);
+if (!map.is_valid()) { /* handle error */ }
+simdjson::padded_string_view view = map.view(); // view is usable while padded_memory_map is in scope
+simdjson::dom::element doc = parser.parse(view); // parse the JSON
+```
+
 Incomplete streams
 -----------
 
@@ -220,12 +306,12 @@ Some users may need to work with truncated streams. The simdjson may truncate do
 
 Consider the following example where a truncated document (`{"key":"intentionally unclosed string  `) containing 39 bytes has been left within the stream. In such cases, the first two whole documents are parsed and returned, and the `truncated_bytes()` method returns 39.
 
-```C++
+```cpp
     auto json = R"([1,2,3]  {"1":1,"2":3,"4":4} {"key":"intentionally unclosed string  )"_padded;
     simdjson::dom::parser parser;
     simdjson::dom::document_stream stream;
     auto error = parser.parse_many(json,json.size()).get(stream);
-    if(error) { std::cerr << error << std::endl; return; }
+    if (error) { std::cerr << error << std::endl; return; }
     for(auto doc : stream) {
        std::cout << doc << std::endl;
     }
@@ -233,4 +319,168 @@ Consider the following example where a truncated document (`{"key":"intentionall
 ```
 
 
-Importantly, you should only call `truncated_bytes()` after iterating through all of the documents since the stream cannot tell whether there are truncated documents at the very end when it may not have accessed that part of the data yet.
+The value returned by `truncated_bytes()` is only meaningful when all of the following hold:
+
+- You have iterated through all of the documents. The stream cannot tell whether there are truncated documents at the very end when it may not have accessed that part of the data yet.
+- No document reported an error. Iteration stops at the first failed document, which can leave the bookkeeping from a mid-stream batch.
+
+Outside these conditions, the value is not merely imprecise: it is arbitrary, and it may exceed `size_in_bytes()` or wrap around to a huge value such as `4294967295`. An empty input (zero bytes) or an input made only of white space contains no document, and `truncated_bytes()` returns zero for it.
+
+If you need to detect a truncated tail outside those conditions, track it yourself from the last document that parsed successfully: `i.current_index() + i.source().size()` is the offset just past the end of that document. See [Reading a large stream in chunks](iterate_many.md#reading-a-large-stream-in-chunks) for a complete example (written for On-Demand, but the same approach works with `parse_many`).
+
+JSON Text Sequences (RFC 7464)
+------------------------------
+
+[RFC 7464](https://tools.ietf.org/html/rfc7464) defines a format for streaming JSON values using ASCII Record Separator (RS, 0x1E) as a delimiter. Each JSON text is preceded by RS and optionally followed by ASCII Line Feed (LF, 0x0A).
+
+Example input:
+```
+<RS>{"name":"doc1"}<LF>
+<RS>{"name":"doc2"}<LF>
+<RS>{"name":"doc3"}<LF>
+```
+
+To parse JSON text sequences, use the `stream_format::json_sequence` parameter:
+
+```cpp
+// Build input with RS (0x1E) and LF (0x0A) delimiters
+std::string input_str;
+input_str += '\x1e'; input_str += "{\"a\":1}"; input_str += '\x0a';
+input_str += '\x1e'; input_str += "{\"b\":2}"; input_str += '\x0a';
+input_str += '\x1e'; input_str += "{\"c\":3}"; input_str += '\x0a';
+simdjson::padded_string input(input_str);
+
+simdjson::dom::parser parser;
+simdjson::dom::document_stream stream;
+auto error = parser.parse_many(input, simdjson::dom::DEFAULT_BATCH_SIZE,
+                               simdjson::stream_format::json_sequence).get(stream);
+if (error) { std::cerr << error << std::endl; return; }
+for (auto doc : stream) {
+    std::cout << doc << std::endl;
+}
+```
+
+The `stream_format` enum has the following values:
+- `stream_format::whitespace_delimited` (default): Standard NDJSON/JSON Lines format
+- `stream_format::json_sequence`: RFC 7464 format with RS delimiters
+- `stream_format::comma_delimited`: Comma-separated JSON documents
+- `stream_format::comma_delimited_array`: A single JSON array whose elements are iterated as comma-delimited documents (see below)
+- `stream_format::newline_delimited`: NDJSON/JSON Lines where each document occupies exactly one line (documents are separated by line feeds and no document contains a raw line feed). Same inputs as `whitespace_delimited`, but with a stronger contract. The delimiter-skip optimization that relies on that contract is implemented for ondemand `iterate_many`; DOM `parse_many` accepts the format and stages documents the same way as whitespace-delimited NDJSON. Use `whitespace_delimited` if unsure.
+
+The trailing LF after each JSON text is optional but recommended by the RFC for robustness.
+
+Comma-Separated Documents
+-------------------------
+
+**We discourage comma-separated documents.** They are not a standard format, and
+simdjson supports them only with significant limitations (see [Limitations of the comma-separated mode](#limitations-of-the-comma-separated-mode)).
+If you control the format, prefer a standard such as JSON Lines/NDJSON (`stream_format::whitespace_delimited`
+or `stream_format::newline_delimited`) or RFC 7464 (`stream_format::json_sequence`).
+
+Some systems produce JSON documents separated by commas, like `{"a":1},{"b":2},{"c":3}`. This is common when extracting elements from a JSON array or when APIs return comma-separated results.
+
+To parse comma-separated documents, use the `stream_format::comma_delimited` parameter:
+
+```cpp
+auto json = R"({"a":1},{"b":2},{"c":3})"_padded;
+simdjson::dom::parser parser;
+simdjson::dom::document_stream stream;
+auto error = parser.parse_many(json, simdjson::dom::DEFAULT_BATCH_SIZE,
+                               simdjson::stream_format::comma_delimited).get(stream);
+if (error) { std::cerr << error << std::endl; return; }
+for (auto doc : stream) {
+    std::cout << doc << std::endl;
+}
+// Prints: {"a":1}
+//         {"b":2}
+//         {"c":3}
+```
+
+Whitespace around the commas is allowed:
+```cpp
+auto json = R"({"a":1} , {"b":2} , {"c":3})"_padded;  // Also works
+```
+
+Nested commas inside objects and arrays are preserved:
+```cpp
+auto json = R"({"arr":[1,2,3]},{"obj":{"x":1,"y":2}})"_padded;
+// Correctly parses as 2 documents, not 6
+```
+
+`stream_format::comma_delimited` supports multi-batch processing and threading for optimal performance on large files.
+
+### Limitations of the comma-separated mode
+
+The comma-separated mode is a convenience for reading such inputs, not a validator. It works by
+removing the commas found at the top level (outside of any object or array) and then splitting the
+remaining bytes as if the documents were separated by white space. Top-level commas are identified
+by counting braces and brackets. This has the following consequences, which apply to both
+`stream_format::comma_delimited` and `stream_format::comma_delimited_array`.
+
+- **Commas are not required.** Documents separated only by white space, or not separated at all, are
+  accepted as if commas were present: `{"a":1} {"b":2}`, `{"a":1}{"b":2}`, `1 2 3` and `"a""b"` all
+  produce separate documents without error. You cannot use this mode to check that an input is
+  properly comma-separated.
+- **Extra commas are ignored.** Leading, trailing and repeated top-level commas (`,,1,,2,`) are skipped
+  silently: they produce neither empty documents nor errors. This matches the legacy
+  On-Demand `allow_comma_separated` behavior.
+- **An incomplete last document is dropped silently.** Given `{"a":1},{"b":2},{"c":`, iteration returns
+  the first two documents and stops without reporting an error. `truncated_bytes()` does **not**
+  tell you how many bytes were dropped in this mode (see [Incomplete streams](#incomplete-streams)).
+- **Mismatched braces or brackets can hide the rest of the stream.** If a document is not balanced,
+  e.g., `{"a":[1,2},{"b":2},{"c":3}`, the parser can no longer tell which commas are at the top level.
+  Iteration may then end without returning any document and without reporting an error, whereas the
+  whitespace-delimited mode reports `TAPE_ERROR` on the same kind of input. When the input spans
+  several batches, you may instead get a `CAPACITY` error even though every document is small.
+- **Every batch must contain a top-level comma.** Except for the last batch, the parser can only end a
+  batch right after a top-level comma. A document together with the comma that follows it must fit
+  within `batch_size`. Furthermore, a run of documents separated only by white space (without commas)
+  is treated like a single document: if such a run is longer than `batch_size`, you get a `CAPACITY`
+  error, even though each document is small and the same input parses fine with
+  `stream_format::whitespace_delimited`.
+
+Because of the silent cases above, if you must know that the whole input was consumed, do not rely on
+the absence of errors. Instead, compare the end of the last document you received
+(`i.current_index() + i.source().size()`) with the size of the input: only white space and commas
+should remain after it.
+
+If your input arrives in pieces (from `stdin`, from a decompressor, from the network),
+see [Reading a large stream in chunks](iterate_many.md#reading-a-large-stream-in-chunks)
+(written for On-Demand, but the same approach works with `parse_many`).
+
+JSON Array As A Document Stream
+-------------------------------
+
+Sometimes an input is a single, well-formed JSON array — `[{"a":1},{"b":2},{"c":3}]` — but you want to iterate its elements one at a time without materializing the whole array. Use `stream_format::comma_delimited_array`:
+
+```cpp
+auto json = R"([{"a":1},{"b":2},{"c":3}])"_padded;
+simdjson::dom::parser parser;
+simdjson::dom::document_stream stream;
+auto error = parser.parse_many(json, simdjson::dom::DEFAULT_BATCH_SIZE,
+                               simdjson::stream_format::comma_delimited_array).get(stream);
+if (error) { std::cerr << error << std::endl; return; }
+for (auto doc : stream) {
+    std::cout << doc << std::endl;
+}
+// Prints: {"a":1}
+//         {"b":2}
+//         {"c":3}
+```
+
+The parser strips the outer `[` and `]` plus any surrounding JSON whitespace (space, tab, LF, CR) and then behaves exactly like `stream_format::comma_delimited` over the remaining bytes. All comma-delimited features are inherited: multi-batch processing, threading, mixed scalar types, and nested commas preserved inside inner objects and arrays.
+
+```cpp
+// All of these work:
+auto a = R"([1, "x", true, null, {"k":"v"}, [1,2]])"_padded;  // mixed scalars
+auto b = R"(  [ 1, 2, 3 ] )"_padded;                          // whitespace
+auto c = R"([])"_padded;                                      // empty array → 0 docs
+```
+
+The **whole** array, from the opening `[` to the closing `]`, must be in the buffer you pass to `parse_many`: `comma_delimited_array` cannot be used on a piece of an array. If the array arrives in pieces (from `stdin`, from a decompressor, from the network), use `stream_format::comma_delimited` instead, as described in [Reading a large stream in chunks](iterate_many.md#reading-a-large-stream-in-chunks).
+
+If the input does not start with `[` and end with `]` (ignoring white space), or if it is empty or all white space, `parse_many` returns `TAPE_ERROR`. That is the only check made on the outer array. Content **inside** the array is not validated up front — individual document parse errors surface when you iterate, just like `comma_delimited`.
+
+In particular, `comma_delimited_array` does **not** check that the input is a valid JSON array. Since the content is handled by the comma-separated mode, all of its [limitations](#limitations-of-the-comma-separated-mode) apply. For example, the invalid arrays `[1,,2]`, `[,1,2,]` and `[1 2]` are all accepted and produce the documents `1` and `2`. An input such as `[1],[2]` passes the initial check, and the problem is reported only during iteration, after the first document has been returned. If you need to validate the array, parse it as a single document with `parse` instead.
+
+Positions reported via `current_index()` are relative to the **stripped** buffer (the bytes between `[` and `]`), not the original input, for consistency with the existing BOM-stripping behavior.

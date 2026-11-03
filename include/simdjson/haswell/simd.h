@@ -1,10 +1,15 @@
 #ifndef SIMDJSON_HASWELL_SIMD_H
 #define SIMDJSON_HASWELL_SIMD_H
 
+#ifndef SIMDJSON_CONDITIONAL_INCLUDE
+#include "simdjson/haswell/base.h"
+#include "simdjson/haswell/intrinsics.h"
+#include "simdjson/haswell/bitmanipulation.h"
 #include "simdjson/internal/simdprune_tables.h"
+#endif // SIMDJSON_CONDITIONAL_INCLUDE
 
 namespace simdjson {
-namespace SIMDJSON_IMPLEMENTATION {
+namespace haswell {
 namespace {
 namespace simd {
 
@@ -60,10 +65,10 @@ namespace simd {
   struct simd8<bool>: base8<bool> {
     static simdjson_inline simd8<bool> splat(bool _value) { return _mm256_set1_epi8(uint8_t(-(!!_value))); }
 
-    simdjson_inline simd8<bool>() : base8() {}
-    simdjson_inline simd8<bool>(const __m256i _value) : base8<bool>(_value) {}
+    simdjson_inline simd8() : base8() {}
+    simdjson_inline simd8(const __m256i _value) : base8<bool>(_value) {}
     // Splat constructor
-    simdjson_inline simd8<bool>(bool _value) : base8<bool>(splat(_value)) {}
+    simdjson_inline simd8(bool _value) : base8<bool>(splat(_value)) {}
 
     simdjson_inline int to_bitmask() const { return _mm256_movemask_epi8(*this); }
     simdjson_inline bool any() const { return !_mm256_testz_si256(*this, *this); }
@@ -295,6 +300,7 @@ namespace simd {
     static constexpr int NUM_CHUNKS = 64 / sizeof(simd8<T>);
     static_assert(NUM_CHUNKS == 2, "Haswell kernel should use two registers per 64-byte block.");
     const simd8<T> chunks[NUM_CHUNKS];
+    template<int idx> simd8<uint8_t> get() const { return idx < NUM_CHUNKS ? chunks[idx] : simd8<T>(); }
 
     simd8x64(const simd8x64<T>& o) = delete; // no copy allowed
     simd8x64<T>& operator=(const simd8<T>& other) = delete; // no assignment allowed
@@ -361,7 +367,7 @@ namespace simd {
 } // namespace simd
 
 } // unnamed namespace
-} // namespace SIMDJSON_IMPLEMENTATION
+} // namespace haswell
 } // namespace simdjson
 
 #endif // SIMDJSON_HASWELL_SIMD_H

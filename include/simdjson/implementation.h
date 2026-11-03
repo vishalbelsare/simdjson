@@ -1,12 +1,10 @@
 #ifndef SIMDJSON_IMPLEMENTATION_H
 #define SIMDJSON_IMPLEMENTATION_H
 
-#include "simdjson/common_defs.h"
+#include "simdjson/internal/atomic_ptr.h"
 #include "simdjson/internal/dom_parser_implementation.h"
-#include "simdjson/internal/isadetection.h"
-#include <string>
-#include <atomic>
-#include <vector>
+
+#include <memory>
 
 namespace simdjson {
 
@@ -38,10 +36,6 @@ simdjson_inline simdjson_warn_unused bool validate_utf8(const std::string& s) no
   return validate_utf8(s.data(), s.size());
 }
 
-namespace dom {
-  class document;
-} // namespace dom
-
 /**
  * An implementation of simdjson for a particular CPU architecture.
  *
@@ -59,7 +53,7 @@ public:
    *
    * @return the name of the implementation, e.g. "haswell", "westmere", "arm64".
    */
-  virtual const std::string &name() const { return _name; }
+  virtual std::string name() const { return std::string(_name); }
 
   /**
    * The description of this implementation.
@@ -69,7 +63,7 @@ public:
    *
    * @return the description of the implementation, e.g. "Intel/AMD AVX2", "Intel/AMD SSE4.2", "ARM NEON".
    */
-  virtual const std::string &description() const { return _description; }
+  virtual std::string description() const { return std::string(_description); }
 
   /**
    * The instruction sets this implementation is compiled against
@@ -145,18 +139,19 @@ protected:
     _required_instruction_sets(required_instruction_sets)
   {
   }
-  virtual ~implementation()=default;
+protected:
+  ~implementation() = default;
 
 private:
   /**
    * The name of this implementation.
    */
-  const std::string _name;
+  std::string_view _name;
 
   /**
    * The description of this implementation.
    */
-  const std::string _description;
+  std::string_view _description;
 
   /**
    * Instruction sets required for this implementation.
@@ -214,24 +209,6 @@ public:
    *         implementation. Will never return nullptr.
    */
   const implementation *detect_best_supported() const noexcept;
-};
-
-template<typename T>
-class atomic_ptr {
-public:
-  atomic_ptr(T *_ptr) : ptr{_ptr} {}
-
-  operator const T*() const { return ptr.load(); }
-  const T& operator*() const { return *ptr; }
-  const T* operator->() const { return ptr.load(); }
-
-  operator T*() { return ptr.load(); }
-  T& operator*() { return *ptr; }
-  T* operator->() { return ptr.load(); }
-  atomic_ptr& operator=(T *_ptr) { ptr = _ptr; return *this; }
-
-private:
-  std::atomic<T*> ptr;
 };
 
 } // namespace internal

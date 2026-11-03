@@ -11,33 +11,53 @@ CPU Architecture-Specific Implementations
 Overview
 --------
 
+
+
 The simdjson library takes advantage of SIMD instruction sets such as NEON, SSE and AVX to achieve
 much of its speed. Because these instruction sets work differently, simdjson has to compile a
 different version of the JSON parser for different CPU architectures, often with different
 algorithms to take better advantage of a given CPU!
 
 The current implementations are:
-* icelake: AVX-512F, AVX-512VBMI, etc.
-* haswell: AVX2 (2013 Intel Haswell or later)
+* icelake: AVX-512F, AVX-512_VBMI, AVX-512_VBMI2, AVX-512_DQ, AVX-512512_CD, AVX-512_BW, AVX-512_VL (2019 Intel Ice Lake, Intel Rocket Lake, Intel Sapphire Rapids, AMD Zen 4)
+* haswell: AVX2 (2013 Intel Haswell or later, all AMD Zen processors)
 * westmere: SSE4.2 (2010 Westmere or later).
 * arm64: 64-bit ARMv8-A NEON
-* ppc64: 64-bit POWER8 and POWER9 with VSX and ALTIVEC extensions. Both big endian and little endian are implemented, depends on the compiler you are using. The library is tested on recent, little-endian, POWER systems.
+* ppc64: 64-bit POWER8 and POWER9 with VSX and ALTIVEC extensions. Both big endian and little endian are implemented, depending on the compiler you are using. The library is tested on recent, little-endian, POWER systems.
+* lasx: Loongson Advanced SIMD EXtension (LASX),  a 256-bit vector expansion for the LoongArch architecture.
+* lsx: Loongson SIMD EXtension (LSX),  a 128-bit vector expansion for the LoongArch architecture.
 * fallback: A generic implementation that runs on any 64-bit processor.
 
 In many cases, you don't know where your compiled binary is going to run, so simdjson automatically
 compiles *all* the implementations into the executable. On Intel, it will include 4 implementations
-(icelake, haswell, westmere and fallback), on ARM it will include 2 (arm64 and fallback), and on PPC
+(icelake, haswell, westmere and fallback), on 64-bit ARM it will include just one since running dispatching is  unnecessary, and on PPC
 it will include 2 (ppc64 and fallback).
+
+On Loongson processors, LASX runtime dispatching is only enabled on GCC 15+, not on LLVM or older versions of GCC.
+Thus unless you compile specifically for LASX or use GCC 15+, you will not benefit from LASX support.
 
 If you know more about where you're going to run and want to save the space, you can disable any of
 these implementations at compile time with `-DSIMDJSON_IMPLEMENTATION_X=0` (where X is ICELAKE, HASWELL,
-WESTMERE, ARM64, PPC64 and FALLBACK).
+WESTMERE, ARM64, PPC64, LSX, LASX and FALLBACK).
 
 The simdjson library automatically sets header flags for each implementation as it compiles; there
 is no need to set architecture-specific flags yourself (e.g., `-mavx2`, `/AVX2`  or
 `-march=haswell`), and it may even break runtime dispatch and your binaries will fail to run on
 older processors. _Note:_ for POWER9 processors make sure you compile it with `-mcpu=power9` and `-mtune=power9` to
 get maximum performance.
+
+### Mixing compiler flags
+
+Some code in the simdjson headers, such as the string escaping used by the builder and by the
+DOM serializer (`minify`, `to_string`, `prettify`), is selected at compile time from the
+instruction sets that your compiler flags enable (e.g., `-mavx2`, `/arch:AVX2`, `-march=native`,
+or the LoongArch, RISC-V vector and POWER8 equivalents). If you compile some files that include
+simdjson with such flags and others without them, the linker may keep the version compiled with
+the wider instruction set for the whole program. Your program must then only run on processors
+that support those instructions. Building your application with `-march=native` against a
+simdjson library built with default flags is fine, since the application already requires your
+processor. What is not supported is compiling only some files with, say, `-mavx2`, and choosing at
+runtime whether to call them so that the program still runs on older processors.
 
 Runtime CPU Detection
 ---------------------
@@ -51,7 +71,7 @@ Inspecting the Detected Implementation
 
 You can check what implementation is running with `active_implementation`:
 
-```c++
+```cpp
 cout << "simdjson v" << SIMDJSON_VERSION << endl;
 cout << "Detected the best implementation for your machine: " << simdjson::get_active_implementation()->name();
 cout << "(" << simdjson::get_active_implementation()->description() << ")" << endl;
@@ -64,7 +84,7 @@ Querying Available Implementations
 
 You can list all available implementations, regardless of which one was selected:
 
-```c++
+```cpp
 for (auto implementation : simdjson::get_available_implementations()) {
   cout << implementation->name() << ": " << implementation->description() << endl;
 }
@@ -72,11 +92,10 @@ for (auto implementation : simdjson::get_available_implementations()) {
 
 And look them up by name:
 
-```c++
+```cpp
 cout << simdjson::get_available_implementations()["fallback"]->description() << endl;
 ```
-Though the fallback implementation should always be available, others might be missing. When
-an implementation is not available, the bracket call `simdjson::get_available_implementations()[name]`
+When an implementation is not available, the bracket call `simdjson::get_available_implementations()[name]`
 will return the null pointer.
 
 The available implementations have been compiled but may not necessarily be run safely on your system
@@ -90,7 +109,7 @@ Manually Selecting the Implementation
 If you're trying to do performance tests or see how different implementations of simdjson run, you
 can select the CPU architecture yourself:
 
-```c++
+```cpp
 // Use the fallback implementation, even though my machine is fast enough for anything
 simdjson::get_active_implementation() = simdjson::get_available_implementations()["fallback"];
 ```
@@ -99,10 +118,10 @@ You are responsible for ensuring that the requirements of the selected implement
 Furthermore, you should check that the implementation is available before setting it to `simdjson::get_active_implementation()`
 by comparing it with the null pointer.
 
-```c++
+```cpp
 auto my_implementation = simdjson::get_available_implementations()["haswell"];
-if(! my_implementation) { exit(1); }
-if(! my_implementation->supported_by_runtime_system()) { exit(1); }
+if (! my_implementation) { exit(1); }
+if (! my_implementation->supported_by_runtime_system()) { exit(1); }
 simdjson::get_active_implementation() = my_implementation;
 ```
 
@@ -111,9 +130,9 @@ Checking that an Implementation can Run on your System
 
 You should call `supported_by_runtime_system()` to compare the processor's features with the need of the implementation.
 
-```c++
+```cpp
 for (auto implementation : simdjson::get_available_implementations()) {
-  if(implementation->supported_by_runtime_system()) {
+  if (implementation->supported_by_runtime_system()) {
     cout << implementation->name() << ": " << implementation->description() << endl;
   }
 }

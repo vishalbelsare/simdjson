@@ -119,7 +119,7 @@ namespace object_error_tests {
   bool object_lookup_miss_unclosed_error() {
     TEST_START();
     ONDEMAND_SUBTEST("unclosed", R"({ "a": 1,         )",    assert_error(doc["b"], INCOMPLETE_ARRAY_OR_OBJECT));
-    // TODO These next two pass the user a value that may run past the end of the buffer if they aren't careful.
+    // TODO These next two pass the user a value that may run past the end of the buffer if they are not careful.
     // In particular, if the padding is decorated with the wrong values, we could cause overrun!
     ONDEMAND_SUBTEST("unclosed", R"({ "a": 1          )",    assert_error(doc["b"], INCOMPLETE_ARRAY_OR_OBJECT));
     ONDEMAND_SUBTEST("unclosed", R"({ "a":            )",    assert_error(doc["b"], INCOMPLETE_ARRAY_OR_OBJECT));
@@ -137,6 +137,27 @@ namespace object_error_tests {
   }
 
 #ifdef SIMDJSON_DEVELOPMENT_CHECKS
+  bool issue2084() {
+    TEST_START();
+    auto json = R"( {"foo": "bar"} )"_padded;
+    SUBTEST("document->value after access", test_ondemand_doc(json, [&](auto doc) {
+      std::string_view foo;
+      ASSERT_SUCCESS(doc["foo"].get(foo));
+      ondemand::value value;
+      ASSERT_ERROR(doc.get_value().get(value), OUT_OF_ORDER_ITERATION);
+      return true;
+    }));
+    SUBTEST("document->value after access and rewind", test_ondemand_doc(json, [&](auto doc) {
+      std::string_view foo;
+      ASSERT_SUCCESS(doc["foo"].get(foo));
+      doc.rewind();
+      ondemand::value value;
+      ASSERT_SUCCESS(doc.get_value().get(value));
+      return true;
+    }));
+    TEST_SUCCEED();
+  }
+
   bool out_of_order_object_iteration_error() {
     TEST_START();
     auto json = R"([ { "x": 1, "y": 2 } ])"_padded;
@@ -541,6 +562,92 @@ namespace object_error_tests {
     }));
     TEST_SUCCEED();
   }
+
+  bool reentrant_object_access_during_iteration_error() {
+    TEST_START();
+    auto json = R"({ "x": 1, "y": 2 })"_padded;
+    SUBTEST("operator[] mid-loop", test_ondemand_doc(json, [&](auto doc) {
+      ondemand::object obj;
+      ASSERT_SUCCESS( doc.get(obj) );
+      for (auto field : obj) {
+        ASSERT_SUCCESS(field);
+        ASSERT_ERROR( obj["x"], OUT_OF_ORDER_ITERATION );
+        break;
+      }
+      return true;
+    }));
+    SUBTEST("find_field mid-loop", test_ondemand_doc(json, [&](auto doc) {
+      ondemand::object obj;
+      ASSERT_SUCCESS( doc.get(obj) );
+      for (auto field : obj) {
+        ASSERT_SUCCESS(field);
+        ASSERT_ERROR( obj.find_field("y"), OUT_OF_ORDER_ITERATION );
+        break;
+      }
+      return true;
+    }));
+    SUBTEST("reset mid-loop", test_ondemand_doc(json, [&](auto doc) {
+      ondemand::object obj;
+      ASSERT_SUCCESS( doc.get(obj) );
+      for (auto field : obj) {
+        ASSERT_SUCCESS(field);
+        ASSERT_ERROR( obj.reset(), OUT_OF_ORDER_ITERATION );
+        break;
+      }
+      return true;
+    }));
+    SUBTEST("revert_position mid-loop", test_ondemand_doc(json, [&](auto doc) {
+      ondemand::object obj;
+      ASSERT_SUCCESS( doc.get(obj) );
+      auto position = obj.get_current_position();
+      for (auto field : obj) {
+        ASSERT_SUCCESS(field);
+        ASSERT_ERROR( obj.revert_position(position), OUT_OF_ORDER_ITERATION );
+        break;
+      }
+      return true;
+    }));
+    TEST_SUCCEED();
+  }
+
+  // An iterator taken from a temporary object must not lock it: the temporary is
+  // gone by the time the iterator is destroyed (ASan: stack-use-after-scope).
+  bool iterator_from_temporary_object() {
+    TEST_START();
+    auto json = R"({ "a": { "x": 1, "y": 2 } })"_padded;
+    SUBTEST("simdjson_result<object> temporary", test_ondemand_doc(json, [&](auto doc) {
+      auto it = doc["a"].get_object().begin();
+      ASSERT_SUCCESS( it );
+      ondemand::field field;
+      ASSERT_SUCCESS( (*it).get(field) );
+      std::string_view key;
+      ASSERT_SUCCESS( field.unescaped_key().get(key) );
+      ASSERT_EQUAL( key, "x" );
+      return true;
+    }));
+    SUBTEST("object temporary", test_ondemand_doc(json, [&](auto doc) {
+      ondemand::object obj;
+      ASSERT_SUCCESS( doc["a"].get(obj) );
+      auto it = ondemand::object(obj).begin();
+      ASSERT_SUCCESS( it );
+      ondemand::field field;
+      ASSERT_SUCCESS( (*it).get(field) );
+      std::string_view key;
+      ASSERT_SUCCESS( field.unescaped_key().get(key) );
+      ASSERT_EQUAL( key, "x" );
+      return true;
+    }));
+    SUBTEST("named simdjson_result<object> still locks", test_ondemand_doc(json, [&](auto doc) {
+      auto obj = doc["a"].get_object();
+      for (auto field : obj) {
+        ASSERT_SUCCESS(field);
+        ASSERT_ERROR( obj["x"], OUT_OF_ORDER_ITERATION );
+        break;
+      }
+      return true;
+    }));
+    TEST_SUCCEED();
+  }
 #endif
 
   bool run() {
@@ -555,6 +662,7 @@ namespace object_error_tests {
            object_lookup_miss_wrong_key_type_error() &&
            object_lookup_miss_next_error() &&
 #ifdef SIMDJSON_DEVELOPMENT_CHECKS
+           issue2084() &&
            out_of_order_object_iteration_error() &&
            out_of_order_top_level_object_iteration_error() &&
            out_of_order_object_index_child_error() &&
@@ -563,6 +671,8 @@ namespace object_error_tests {
            out_of_order_object_find_field_sibling_error() &&
            out_of_order_object_find_field_unordered_child_error() &&
            out_of_order_object_find_field_unordered_sibling_error() &&
+           reentrant_object_access_during_iteration_error() &&
+           iterator_from_temporary_object() &&
 #endif
            true;
   }

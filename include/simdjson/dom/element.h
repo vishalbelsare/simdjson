@@ -1,20 +1,13 @@
 #ifndef SIMDJSON_DOM_ELEMENT_H
 #define SIMDJSON_DOM_ELEMENT_H
 
-#include "simdjson/common_defs.h"
-#include "simdjson/error.h"
-#include "simdjson/internal/tape_ref.h"
-#include <ostream>
+#include <vector>
+
+#include "simdjson/dom/base.h"
+#include "simdjson/dom/array.h"
 
 namespace simdjson {
-namespace internal {
-template<typename T>
-class string_builder;
-}
 namespace dom {
-class array;
-class document;
-class object;
 
 /**
  * The actual concrete type of a JSON element
@@ -28,7 +21,10 @@ enum class element_type {
   DOUBLE = 'd',    ///< double: Any number with a "." or "e" that fits in double.
   STRING = '"',    ///< std::string_view
   BOOL = 't',      ///< bool
-  NULL_VALUE = 'n' ///< null
+  NULL_VALUE = 'n', ///< null
+  /// The BIGINT type is for integers that do not fit in 64 bits. It is only present
+  // if you set parser.number_as_string(true).
+  BIGINT = 'Z'     ///< std::string_view: big integer stored as raw digit string
 };
 
 /**
@@ -96,6 +92,20 @@ public:
    *          Returns INCORRECT_TYPE if the JSON element is not a string.
    */
   inline simdjson_result<std::string_view> get_string() const noexcept;
+
+  #if SIMDJSON_SUPPORTS_CHAR8_T
+  /**
+   * Cast this element to a C++20 UTF-8 string.
+   *
+   * The string is guaranteed to be valid UTF-8.
+   *
+   * @returns A std::u8string_view. The string is stored in the parser and will be invalidated the next time it
+   *          parses a document or when it is destroyed.
+   *          Returns INCORRECT_TYPE if the JSON element is not a string.
+   */
+  inline simdjson_result<std::u8string_view> get_u8string() const noexcept;
+  #endif
+
   /**
    * Cast this element to a signed integer.
    *
@@ -126,6 +136,14 @@ public:
    *          Returns INCORRECT_TYPE if the JSON element is not a boolean.
    */
   inline simdjson_result<bool> get_bool() const noexcept;
+
+  /**
+   * Read this element as a big integer (raw digit string).
+   *
+   * @returns A string_view of the raw digits, or:
+   *          INCORRECT_TYPE if the JSON element is not a big integer.
+   */
+  inline simdjson_result<std::string_view> get_bigint() const noexcept;
 
   /**
    * Whether this element is a json array.
@@ -183,12 +201,17 @@ public:
   inline bool is_null() const noexcept;
 
   /**
+   * Whether this element is a big integer (number exceeding 64-bit range).
+   */
+  inline bool is_bigint() const noexcept;
+
+  /**
    * Tell whether the value can be cast to provided type (T).
    *
    * Supported types:
    * - Boolean: bool
    * - Number: double, uint64_t, int64_t
-   * - String: std::string_view, const char *
+   * - String: std::string_view, const char *, std::u8string_view (C++20)
    * - Array: dom::array
    * - Object: dom::object
    *
@@ -203,7 +226,7 @@ public:
    * Supported types:
    * - Boolean: bool
    * - Number: double, uint64_t, int64_t
-   * - String: std::string_view, const char *
+   * - String: std::string_view, const char *, std::u8string_view (C++20)
    * - Array: dom::array
    * - Object: dom::object
    *
@@ -220,7 +243,11 @@ public:
   inline simdjson_result<T> get() const noexcept {
     // Unless the simdjson library provides an inline implementation, calling this method should
     // immediately fail.
-    static_assert(!sizeof(T), "The get method with given type is not implemented by the simdjson library.");
+    static_assert(!sizeof(T), "The get method with given type is not implemented by the simdjson library. "
+      "The supported types are Boolean (bool), numbers (double, uint64_t, int64_t), "
+      "strings (std::string_view, const char *), arrays (dom::array) and objects (dom::object). "
+      "We recommend you use get_double(), get_bool(), get_uint64(), get_int64(), "
+      "get_object(), get_array() or get_string() instead of the get template.");
   }
 
   /**
@@ -229,7 +256,7 @@ public:
    * Supported types:
    * - Boolean: bool
    * - Number: double, uint64_t, int64_t
-   * - String: std::string_view, const char *
+   * - String: std::string_view, const char *, std::u8string_view (C++20)
    * - Array: dom::array
    * - Object: dom::object
    *
@@ -248,7 +275,7 @@ public:
    * Supported types:
    * - Boolean: bool
    * - Number: double, uint64_t, int64_t
-   * - String: std::string_view, const char *
+   * - String: std::string_view, const char *, std::u8string_view (C++20)
    * - Array: dom::array
    * - Object: dom::object
    *
@@ -298,7 +325,7 @@ public:
    *
    * @return The integer value.
    * @exception simdjson_error(INCORRECT_TYPE) if the JSON element is not an integer
-   * @exception simdjson_error(NUMBER_OUT_OF_RANGE) if the integer doesn't fit in 64 bits or is negative
+   * @exception simdjson_error(NUMBER_OUT_OF_RANGE) if the integer does not fit in 64 bits or is negative
    */
   inline operator uint64_t() const noexcept(false);
   /**
@@ -306,7 +333,7 @@ public:
    *
    * @return The integer value.
    * @exception simdjson_error(INCORRECT_TYPE) if the JSON element is not an integer
-   * @exception simdjson_error(NUMBER_OUT_OF_RANGE) if the integer doesn't fit in 64 bits
+   * @exception simdjson_error(NUMBER_OUT_OF_RANGE) if the integer does not fit in 64 bits
    */
   inline operator int64_t() const noexcept(false);
   /**
@@ -314,7 +341,6 @@ public:
    *
    * @return The double value.
    * @exception simdjson_error(INCORRECT_TYPE) if the JSON element is not a number
-   * @exception simdjson_error(NUMBER_OUT_OF_RANGE) if the integer doesn't fit in 64 bits or is negative
    */
   inline operator double() const noexcept(false);
   /**
@@ -378,6 +404,8 @@ public:
    *         - INCORRECT_TYPE if this is not an object
    */
   inline simdjson_result<element> operator[](const char *key) const noexcept;
+  simdjson_result<element> operator[](int) const noexcept = delete;
+
 
   /**
    * Get the value associated with the given JSON pointer.  We use the RFC 6901
@@ -402,6 +430,23 @@ public:
    *         - INVALID_JSON_POINTER if the JSON pointer is invalid and cannot be parsed
    */
   inline simdjson_result<element> at_pointer(const std::string_view json_pointer) const noexcept;
+
+  inline simdjson_result<std::vector<element>> at_path_with_wildcard(const std::string_view json_path) const noexcept;
+
+  /**
+   * Get the value associated with the given JSONPath expression. We only support
+   * JSONPath queries that trivially convertible to JSON Pointer queries: key
+   * names and array indices.
+   *
+   * https://www.rfc-editor.org/rfc/rfc9535 (RFC 9535)
+   *
+   * @return The value associated with the given JSONPath expression, or:
+   *         - INVALID_JSON_POINTER if the JSONPath to JSON Pointer conversion fails
+   *         - NO_SUCH_FIELD if a field does not exist in an object
+   *         - INDEX_OUT_OF_BOUNDS if an array index is larger than an array length
+   *         - INCORRECT_TYPE if a non-integer is used to access an array
+  */
+  inline simdjson_result<element> at_path(std::string_view json_path) const noexcept;
 
 #ifndef SIMDJSON_DISABLE_DEPRECATED_API
   /**
@@ -460,12 +505,28 @@ public:
    */
   inline simdjson_result<element> at_key_case_insensitive(std::string_view key) const noexcept;
 
+  /**
+   * operator< defines a total order for element allowing to use them in
+   * ordered C++ STL containers
+   *
+   * @return TRUE if the key appears before the other one in the tape
+   */
+  inline bool operator<(const element &other) const noexcept;
+
+  /**
+   * operator== allows to verify if two element values reference the
+   * same JSON item
+   *
+   * @return TRUE if the two values references the same JSON element
+   */
+  inline bool operator==(const element &other) const noexcept;
+
   /** @private for debugging. Prints out the root element. */
   inline bool dump_raw_tape(std::ostream &out) const noexcept;
 
 private:
   simdjson_inline element(const internal::tape_ref &tape) noexcept;
-  internal::tape_ref tape;
+  internal::tape_ref tape{};
   friend class document;
   friend class object;
   friend class array;
@@ -498,10 +559,14 @@ public:
   simdjson_inline simdjson_result<const char *> get_c_str() const noexcept;
   simdjson_inline simdjson_result<size_t> get_string_length() const noexcept;
   simdjson_inline simdjson_result<std::string_view> get_string() const noexcept;
+  #if SIMDJSON_SUPPORTS_CHAR8_T
+  simdjson_inline simdjson_result<std::u8string_view> get_u8string() const noexcept;
+  #endif
   simdjson_inline simdjson_result<int64_t> get_int64() const noexcept;
   simdjson_inline simdjson_result<uint64_t> get_uint64() const noexcept;
   simdjson_inline simdjson_result<double> get_double() const noexcept;
   simdjson_inline simdjson_result<bool> get_bool() const noexcept;
+  simdjson_inline simdjson_result<std::string_view> get_bigint() const noexcept;
 
   simdjson_inline bool is_array() const noexcept;
   simdjson_inline bool is_object() const noexcept;
@@ -512,10 +577,14 @@ public:
   simdjson_inline bool is_number() const noexcept;
   simdjson_inline bool is_bool() const noexcept;
   simdjson_inline bool is_null() const noexcept;
+  simdjson_inline bool is_bigint() const noexcept;
 
   simdjson_inline simdjson_result<dom::element> operator[](std::string_view key) const noexcept;
   simdjson_inline simdjson_result<dom::element> operator[](const char *key) const noexcept;
+  simdjson_result<dom::element> operator[](int) const noexcept = delete;
   simdjson_inline simdjson_result<dom::element> at_pointer(const std::string_view json_pointer) const noexcept;
+  simdjson_inline simdjson_result<std::vector<dom::element>> at_path_with_wildcard(const std::string_view json_path) const noexcept;
+  simdjson_inline simdjson_result<dom::element> at_path(const std::string_view json_path) const noexcept;
   [[deprecated("For standard compliance, use at_pointer instead, and prefix your pointers with a slash '/', see RFC6901 ")]]
   simdjson_inline simdjson_result<dom::element> at(const std::string_view json_pointer) const noexcept;
   simdjson_inline simdjson_result<dom::element> at(size_t index) const noexcept;
@@ -536,7 +605,6 @@ public:
   simdjson_inline dom::array::iterator end() const noexcept(false);
 #endif // SIMDJSON_EXCEPTIONS
 };
-
 
 } // namespace simdjson
 

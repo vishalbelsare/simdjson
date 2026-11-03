@@ -1,5 +1,9 @@
-#include "simdjson/dom/serialization.h"
-#include "simdjson/error.h"
+#ifndef SIMDJSON_GENERIC_ONDEMAND_SERIALIZATION_H
+
+#ifndef SIMDJSON_CONDITIONAL_INCLUDE
+#define SIMDJSON_GENERIC_ONDEMAND_SERIALIZATION_H
+#include "simdjson/generic/ondemand/base.h"
+#endif // SIMDJSON_CONDITIONAL_INCLUDE
 
 namespace simdjson {
 /**
@@ -31,6 +35,20 @@ inline simdjson_result<std::string_view> to_json_string(simdjson_result<SIMDJSON
 inline simdjson_result<std::string_view> to_json_string(simdjson_result<SIMDJSON_IMPLEMENTATION::ondemand::value> x);
 inline simdjson_result<std::string_view> to_json_string(simdjson_result<SIMDJSON_IMPLEMENTATION::ondemand::object> x);
 inline simdjson_result<std::string_view> to_json_string(simdjson_result<SIMDJSON_IMPLEMENTATION::ondemand::array> x);
+
+#if SIMDJSON_STATIC_REFLECTION
+/**
+ * Create a JSON string from any user-defined type using static reflection.
+ * Only available when SIMDJSON_STATIC_REFLECTION is enabled.
+ */
+template<typename T>
+  requires(!std::same_as<T, SIMDJSON_IMPLEMENTATION::ondemand::document> &&
+           !std::same_as<T, SIMDJSON_IMPLEMENTATION::ondemand::value> &&
+           !std::same_as<T, SIMDJSON_IMPLEMENTATION::ondemand::object> &&
+           !std::same_as<T, SIMDJSON_IMPLEMENTATION::ondemand::array>)
+inline std::string to_json_string(const T& obj);
+#endif
+
 } // namespace simdjson
 
 /**
@@ -95,3 +113,5 @@ inline std::ostream& operator<<(std::ostream& out, simdjson::SIMDJSON_IMPLEMENTA
 inline std::ostream& operator<<(std::ostream& out, simdjson::simdjson_result<simdjson::SIMDJSON_IMPLEMENTATION::ondemand::object> x);
 #endif
 }}} // namespace simdjson::SIMDJSON_IMPLEMENTATION::ondemand
+
+#endif // SIMDJSON_GENERIC_ONDEMAND_SERIALIZATION_H

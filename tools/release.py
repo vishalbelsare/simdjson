@@ -16,7 +16,7 @@ def colored(r, g, b, text):
     return "\033[38;2;{};{};{}m{} \033[38;2;255;255;255m".format(r, g, b, text)
 
 def extractnumbers(s):
-    return tuple(map(int,re.findall("(\d+)\.(\d+)\.(\d+)",str(s))[0]))
+    return tuple(map(int,re.findall(r"(\d+)\.(\d+)\.(\d+)",str(s))[0]))
 
 def toversionstring(major, minor, rev):
     return str(major)+"."+str(minor)+"."+str(rev)
@@ -37,20 +37,23 @@ if(ret != 0):
     sys.exit(ret)
 print("Calling git log HEAD.. --oneline")
 pipe = subprocess.Popen(["git", "log", "HEAD..", "--oneline"], stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
-print("the commandline is {}".format(pipe.args))
+print("the commandline is '{}'".format(pipe.args))
 uptodateresult = pipe.communicate()[0].decode().strip()
 
 if(len(uptodateresult) != 0):
     print(uptodateresult)
     sys.exit(-1)
+print("answer: "+uptodateresult)
 
 pipe = subprocess.Popen(["git", "rev-parse", "--show-toplevel"], stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
 maindir = pipe.communicate()[0].decode().strip()
+
 scriptlocation = os.path.dirname(os.path.abspath(__file__))
 
 print("repository: "+maindir)
 
 pipe = subprocess.Popen(["git", "describe", "--abbrev=0", "--tags"], stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+print("the commandline is '{}'".format(pipe.args))
 versionresult = pipe.communicate()[0].decode().strip()
 
 print("last version: "+versionresult )
@@ -123,7 +126,7 @@ newversionstring = str(newversion[0]) + "." + str(newversion[1]) + "." + str(new
 cmakefile = maindir + os.sep + "CMakeLists.txt"
 
 sonumber = None
-pattern = re.compile("set\(SIMDJSON_LIB_SOVERSION \"(\d+)\" CACHE STRING \"simdjson library soversion\"\)")
+pattern = re.compile(r"set\(SIMDJSON_LIB_SOVERSION \"(\d+)\" CACHE STRING \"simdjson library soversion\"\)")
 with open (cmakefile, 'rt') as myfile:
     for line in myfile:
         m = pattern.search(line)
@@ -138,9 +141,9 @@ if(atleastminor):
     sonumber += 1
 
 for line in fileinput.input(cmakefile, inplace=1, backup='.bak'):
-    line = re.sub('    VERSION \d+\.\d+\.\d+','    VERSION '+newmajorversionstring+'.'+mewminorversionstring+'.'+newrevversionstring, line.rstrip())
-    line = re.sub('SIMDJSON_LIB_VERSION "\d+','SIMDJSON_LIB_VERSION "'+str(sonumber), line)
-    line = re.sub('set\(SIMDJSON_LIB_SOVERSION \"\d+\"','set(SIMDJSON_LIB_SOVERSION \"'+str(sonumber)+'\"', line)
+    line = re.sub(r'    VERSION \d+\.\d+\.\d+','    VERSION '+newmajorversionstring+'.'+mewminorversionstring+'.'+newrevversionstring, line.rstrip())
+    line = re.sub(r'SIMDJSON_LIB_VERSION "\d+','SIMDJSON_LIB_VERSION "'+str(sonumber), line)
+    line = re.sub(r'set\(SIMDJSON_LIB_SOVERSION \"\d+\"','set(SIMDJSON_LIB_SOVERSION \"'+str(sonumber)+'\"', line)
     print(line)
 
 print("modified "+cmakefile+", a backup was made")
@@ -148,7 +151,7 @@ print("modified "+cmakefile+", a backup was made")
 
 doxyfile = maindir + os.sep + "Doxyfile"
 for line in fileinput.input(doxyfile, inplace=1, backup='.bak'):
-    line = re.sub('PROJECT_NUMBER         = "\d+\.\d+\.\d+','PROJECT_NUMBER         = "'+newversionstring, line.rstrip())
+    line = re.sub(r'PROJECT_NUMBER         = "\d+\.\d+\.\d+','PROJECT_NUMBER         = "'+newversionstring, line.rstrip())
     print(line)
 print("modified "+doxyfile+", a backup was made")
 
@@ -161,16 +164,16 @@ if(cp.returncode != 0):
     print("Failed to run amalgamate")
 
 print("running doxygen")
-cp = subprocess.run(["doxygen"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, cwd=maindir)  # doesn't capture output
-print("the commandline is {}".format(cp.args))
+try:
+    cp = subprocess.run(["doxygen"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, cwd=maindir)  # doesn't capture output
+    print("the commandline is {}".format(cp.args))
+    if(cp.returncode != 0):
+        print("Failed to run doxygen")
+except FileNotFoundError:
+    print("doxygen is not installed, skipping the documentation")
 
-if(cp.returncode != 0):
-    print("Failed to run doxygen")
 
-#ipe = subprocess.Popen(["doxygen"], stdout=subprocess.PIPE, stderr=subprocess.STDOUT, cwd=maindir)
-#doxygenresult = pipe.communicate()[0].decode().strip()
-
-pattern = re.compile("https://simdjson.org/api/(\d+\.\d+\.\d+)/index.html")
+pattern = re.compile(r"https://simdjson.org/api/(\d+\.\d+\.\d+)/index.html")
 readmefile = maindir + os.sep + "README.md"
 readmedata = open(readmefile).read()
 m = pattern.search(readmedata)
@@ -182,8 +185,6 @@ else:
     if(atleastminor):
        if(detectedreadme != toversionstring(*newversion)):
            print(colored(255, 0, 0, "Consider updating the readme link to "+toversionstring(*newversion)))
-
-
 
 print("Please run the tests before issuing a release. \n")
 print("to issue release, enter \n git commit -a && git push  &&  git tag -a v"+toversionstring(*newversion)+" -m \"version "+toversionstring(*newversion)+"\" &&  git push --tags \n")

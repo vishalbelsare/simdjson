@@ -114,6 +114,20 @@ namespace parser_load {
     TEST_SUCCEED();
   }
 
+  bool parser_load_string_view_subpath() {
+    TEST_START();
+    const std::string valid_path(TWITTER_JSON);
+    const std::string backing = valid_path + ".extra";
+    const std::string_view view(backing.data(), valid_path.size());
+    uint64_t count_from_string = 0;
+    uint64_t count_from_view = 0;
+    dom::parser parser;
+    ASSERT_SUCCESS(parser.load(valid_path)["search_metadata"]["count"].get(count_from_string));
+    ASSERT_SUCCESS(parser.load(view)["search_metadata"]["count"].get(count_from_view));
+    ASSERT_EQUAL(count_from_view, count_from_string);
+    TEST_SUCCEED();
+  }
+
   bool parser_load_chain() {
     TEST_START();
     dom::parser parser;
@@ -136,6 +150,7 @@ namespace parser_load {
         && parser_load_nonexistent()
         && parser_load_many_nonexistent()
         && padded_string_load_nonexistent()
+        && parser_load_string_view_subpath()
         && parser_load_chain()
         && parser_load_many_chain()
         && parser_parse_many_documents_error_in_the_middle()
@@ -178,6 +193,47 @@ namespace adversarial {
     ASSERT_ERROR( parser.parse(json, len).get(foo), TAPE_ERROR ); // Parse just the first digit
     TEST_SUCCEED();
   }
+  bool allocation_limits() {
+    TEST_START();
+    dom::parser parser;
+    ASSERT_ERROR( parser.allocate(64, 0), CAPACITY );
+    ASSERT_ERROR( parser.allocate(SIZE_MAX, DEFAULT_MAX_DEPTH), CAPACITY );
+    ASSERT_ERROR( parser.allocate(SIZE_MAX - 63, DEFAULT_MAX_DEPTH), CAPACITY );
+    ASSERT_ERROR( parser.allocate(64, SIZE_MAX), CAPACITY );
+    ASSERT_SUCCESS( parser.allocate(1024, DEFAULT_MAX_DEPTH) );
+    auto json = "[1,2,3]"_padded;
+    dom::element doc;
+    ASSERT_SUCCESS( parser.parse(json).get(doc) );
+    TEST_SUCCEED();
+  }
+  // A failed allocate() on a fresh parser must not leave a half-built
+  // implementation behind: parse() used to run stage 2 without its stacks.
+  bool failed_allocate_then_parse() {
+    TEST_START();
+    auto json = "[1,2,3]"_padded;
+    auto scalar = "1"_padded;
+    const size_t bad_depths[] = { 0, SIMDJSON_MAX_DEPTH + 1 };
+    for (size_t bad_depth : bad_depths) {
+      dom::parser parser;
+      ASSERT_ERROR( parser.allocate(1024, bad_depth), CAPACITY );
+      ASSERT_EQUAL( parser.capacity(), 0 );
+      ASSERT_EQUAL( parser.max_depth(), DEFAULT_MAX_DEPTH );
+      dom::element doc;
+      ASSERT_SUCCESS( parser.parse(json).get(doc) );
+      ASSERT_SUCCESS( parser.parse(scalar).get(doc) );
+    }
+    // A parser that was already allocated keeps its settings.
+    for (size_t bad_depth : bad_depths) {
+      dom::parser parser;
+      ASSERT_SUCCESS( parser.allocate(1024, 16) );
+      ASSERT_ERROR( parser.allocate(1024, bad_depth), CAPACITY );
+      ASSERT_EQUAL( parser.capacity(), 1024 );
+      ASSERT_EQUAL( parser.max_depth(), 16 );
+      dom::element doc;
+      ASSERT_SUCCESS( parser.parse(json).get(doc) );
+    }
+    TEST_SUCCEED();
+  }
   bool run() {
     constexpr size_t filler_size = 65;
     static_assert(filler_size > SIMDJSON_PADDING, "corruption test doesn't have enough padding"); // 33 = std::strlen(PADDING_FILLED_WITH_NUMBERS)
@@ -185,7 +241,31 @@ namespace adversarial {
       && number_overrun_at_root()
       && number_overrun_in_array()
       && number_overrun_in_object()
+      && failed_allocate_then_parse()
+      && allocation_limits()
     ;
+  }
+}
+
+namespace result_forwarding {
+  // get_values on a failed simdjson_result must leave the output untouched,
+  // not read the (default-constructed) array or object.
+  bool get_values_on_error() {
+    TEST_START();
+    dom::parser parser;
+    dom::element doc;
+    ASSERT_SUCCESS( parser.parse(R"({"a":1})"_padded).get(doc) );
+    std::vector<dom::element> out;
+    simdjson_result<dom::array> not_an_array = doc.get_array();
+    ASSERT_ERROR( not_an_array.error(), INCORRECT_TYPE );
+    ASSERT_EQUAL( not_an_array.get_values(out).size(), 0 );
+    simdjson_result<dom::object> not_an_object = doc["a"].get_object();
+    ASSERT_ERROR( not_an_object.error(), INCORRECT_TYPE );
+    ASSERT_EQUAL( not_an_object.get_values(out).size(), 0 );
+    TEST_SUCCEED();
+  }
+  bool run() {
+    return get_values_on_error();
   }
 }
 
@@ -226,6 +306,7 @@ int main(int argc, char *argv[]) {
   if (!(true
         && parser_load::run()
         && adversarial::run()
+        && result_forwarding::run()
   )) {
     return EXIT_FAILURE;
   }

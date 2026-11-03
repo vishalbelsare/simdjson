@@ -5,6 +5,67 @@ using namespace simdjson;
 
 namespace misc_tests {
   using namespace std;
+  bool issue2354() {
+    TEST_START();
+    auto json = "true   "_padded;
+    ondemand::parser parser;
+    ondemand::document doc;
+    ASSERT_SUCCESS(parser.iterate(json).get(doc));
+    bool b;
+    ASSERT_SUCCESS(doc.get_bool().get(b));
+    ASSERT_TRUE(b);
+    TEST_SUCCEED();
+  }
+  bool issue2355() {
+    TEST_START();
+    simdjson::ondemand::parser parser;
+    auto json = "[\"extra close\"]]"_padded;
+    ondemand::document doc;
+    ASSERT_SUCCESS(parser.iterate(json).get(doc));
+    simdjson::ondemand::array test;
+    ASSERT_SUCCESS(doc.get_array().get(test));
+    for(auto vale : test) {
+      std::string_view str;
+      ASSERT_SUCCESS(vale.get_string().get(str));
+      ASSERT_EQUAL(str, "extra close");
+    }
+    ASSERT_FALSE(doc.at_end());
+    TEST_SUCCEED();
+  }
+
+  bool issue2322() {
+    TEST_START();
+    std::vector<std::pair<std::string, bool>> examples = {{R"("hello")", false},
+                                          {R"(\"hello)", true},
+                                          {R"("hello\")", true},
+                                          {R"("hel\"lo")", false},
+                                          {R"("hel\\lo")", false},
+                                          {R"(\"hel\\\"lo\")", true},
+                                          {R"(\\"hel\\\"lo\")", false}};
+    for (std::pair<std::string, bool> v : examples) {
+      ASSERT_EQUAL(ondemand::raw_json_string::is_free_from_unescaped_quote(v.first),
+                  v.second);
+      ASSERT_EQUAL(ondemand::raw_json_string::is_free_from_unescaped_quote(v.first.c_str()),
+                  v.second);
+    }
+    TEST_SUCCEED();
+  }
+#if SIMDJSON_EXCEPTIONS
+  // user reported an asan error:
+  bool issue2199() {
+    TEST_START();
+    static constexpr std::string_view kJsonString = R"( { "name": "name", "version": 100, } )";
+    try {
+      simdjson::padded_string buffer{kJsonString};
+      simdjson::ondemand::parser parser;
+      simdjson::ondemand::document document = parser.iterate(buffer);
+      (void)document;
+    } catch (simdjson::simdjson_error& /*error*/) {
+      std::cerr << "Caught simdjson_error" << std::endl;
+    }
+    TEST_SUCCEED();
+  }
+#endif
   bool issue1981_success() {
     auto error_phrase = R"(false)"_padded;
     TEST_START();
@@ -12,10 +73,22 @@ namespace misc_tests {
     ondemand::document doc;
     ASSERT_SUCCESS(parser.iterate(error_phrase).get(doc));
     bool b;
-    ASSERT_SUCCESS( doc.get_bool().get(b));
+    ASSERT_SUCCESS(doc.get_bool().get(b));
     ASSERT_FALSE(b);
     TEST_SUCCEED();
   }
+  bool skipbom() {
+    auto error_phrase = "\xEF\xBB\xBF false"_padded;
+    TEST_START();
+    ondemand::parser parser;
+    ondemand::document doc;
+    ASSERT_SUCCESS(parser.iterate(error_phrase).get(doc));
+    bool b;
+    ASSERT_SUCCESS(doc.get_bool().get(b));
+    ASSERT_FALSE(b);
+    TEST_SUCCEED();
+  }
+
 
   bool issue1981_failure() {
     auto error_phrase = R"(falseA)"_padded;
@@ -25,6 +98,19 @@ namespace misc_tests {
     ASSERT_SUCCESS(parser.iterate(error_phrase).get(doc));
     bool b;
     ASSERT_ERROR( doc.get_bool().get(b), INCORRECT_TYPE);
+    TEST_SUCCEED();
+  }
+
+  bool root_bool_rejects_invalid_fifth_char() {
+    TEST_START();
+    for (auto bad : {"falsx", "fals1", "fals "}) {
+      ondemand::parser parser;
+      padded_string json{std::string(bad)};
+      ondemand::document doc;
+      ASSERT_SUCCESS(parser.iterate(json).get(doc));
+      bool b;
+      ASSERT_ERROR(doc.get_bool().get(b), INCORRECT_TYPE);
+    }
     TEST_SUCCEED();
   }
 
@@ -93,6 +179,70 @@ namespace misc_tests {
      size_t count{};
     ASSERT_SUCCESS(arr.count_elements().get(count));
     ASSERT_EQUAL(3,count);
+    TEST_SUCCEED();
+  }
+
+  // A root array or object obtained with document::get_value() is a value at
+  // depth 1. Calling a scalar getter on it used to trip the debug assertion
+  // in value_iterator::assert_at_non_root_start() (undefined behavior in
+  // release builds). It must return an error (INCORRECT_TYPE, or NUMBER_ERROR
+  // for the generic number getters, as for nested values) and leave the value
+  // usable.
+  template <typename F>
+  bool scalar_getter_on_root_container(F getter) {
+    for (std::string_view text : {R"([1,"a",true,null])", R"({"a":1,"b":"c"})"}) {
+      padded_string json(text);
+      ondemand::parser parser;
+      ondemand::document doc;
+      ASSERT_SUCCESS(parser.iterate(json).get(doc));
+      ondemand::value val;
+      ASSERT_SUCCESS(doc.get_value().get(val));
+      if (!getter(val)) { return false; }
+      // The value has not been consumed: we can still iterate over it.
+      ondemand::json_type type;
+      ASSERT_SUCCESS(val.type().get(type));
+      size_t count{};
+      if (type == ondemand::json_type::array) {
+        ASSERT_SUCCESS(val.count_elements().get(count));
+        ASSERT_EQUAL(count, 4);
+      } else {
+        ASSERT_SUCCESS(val.count_fields().get(count));
+        ASSERT_EQUAL(count, 2);
+      }
+    }
+    return true;
+  }
+
+  bool scalar_getters_on_root_container_value() {
+    TEST_START();
+    ASSERT_TRUE(scalar_getter_on_root_container([](ondemand::value &v) {
+      uint64_t x; ASSERT_ERROR(v.get_uint64().get(x), INCORRECT_TYPE); return true; }));
+    ASSERT_TRUE(scalar_getter_on_root_container([](ondemand::value &v) {
+      uint64_t x; ASSERT_ERROR(v.get_uint64_in_string().get(x), INCORRECT_TYPE); return true; }));
+    ASSERT_TRUE(scalar_getter_on_root_container([](ondemand::value &v) {
+      int64_t x; ASSERT_ERROR(v.get_int64().get(x), INCORRECT_TYPE); return true; }));
+    ASSERT_TRUE(scalar_getter_on_root_container([](ondemand::value &v) {
+      int64_t x; ASSERT_ERROR(v.get_int64_in_string().get(x), INCORRECT_TYPE); return true; }));
+    ASSERT_TRUE(scalar_getter_on_root_container([](ondemand::value &v) {
+      double x; ASSERT_ERROR(v.get_double().get(x), INCORRECT_TYPE); return true; }));
+    ASSERT_TRUE(scalar_getter_on_root_container([](ondemand::value &v) {
+      double x; ASSERT_ERROR(v.get_double_in_string().get(x), INCORRECT_TYPE); return true; }));
+    ASSERT_TRUE(scalar_getter_on_root_container([](ondemand::value &v) {
+      float x; ASSERT_ERROR(v.get_float().get(x), INCORRECT_TYPE); return true; }));
+    ASSERT_TRUE(scalar_getter_on_root_container([](ondemand::value &v) {
+      bool x; ASSERT_ERROR(v.get_bool().get(x), INCORRECT_TYPE); return true; }));
+    ASSERT_TRUE(scalar_getter_on_root_container([](ondemand::value &v) {
+      bool x; ASSERT_SUCCESS(v.is_null().get(x)); ASSERT_FALSE(x); return true; }));
+    ASSERT_TRUE(scalar_getter_on_root_container([](ondemand::value &v) {
+      std::string_view x; ASSERT_ERROR(v.get_string().get(x), INCORRECT_TYPE); return true; }));
+    ASSERT_TRUE(scalar_getter_on_root_container([](ondemand::value &v) {
+      ondemand::number x; ASSERT_ERROR(v.get_number().get(x), NUMBER_ERROR); return true; }));
+    ASSERT_TRUE(scalar_getter_on_root_container([](ondemand::value &v) {
+      bool x; ASSERT_ERROR(v.is_integer().get(x), NUMBER_ERROR); return true; }));
+    ASSERT_TRUE(scalar_getter_on_root_container([](ondemand::value &v) {
+      ondemand::number_type x; ASSERT_ERROR(v.get_number_type().get(x), NUMBER_ERROR); return true; }));
+    ASSERT_TRUE(scalar_getter_on_root_container([](ondemand::value &v) {
+      ASSERT_FALSE(v.is_negative()); return true; }));
     TEST_SUCCEED();
   }
 
@@ -509,6 +659,63 @@ namespace misc_tests {
     TEST_SUCCEED();
   }
 
+  simdjson_warn_unused bool issue2312() {
+    TEST_START();
+    std::string init_string = R"("abc":)";
+    init_string.resize(init_string.size() + simdjson::SIMDJSON_PADDING);
+    simdjson::padded_string_view padded_view{init_string.data(), 5, init_string.size()};
+    simdjson::ondemand::parser parser;
+    simdjson::ondemand::document doc;
+    ASSERT_SUCCESS(parser.iterate(padded_view).get(doc));
+    std::string_view abc;
+    ASSERT_SUCCESS(doc.get_string().get(abc));
+    ASSERT_EQUAL(abc, "abc");
+    ASSERT_SUCCESS(parser.iterate(padded_view).get(doc));
+    std::string_view raw;
+    ASSERT_SUCCESS(doc.raw_json().get(raw));
+    ASSERT_EQUAL(raw, "\"abc\"");
+    TEST_SUCCEED();
+  }
+
+  // raw_json() on a document, an array or an object ends on its last byte, not on
+  // the white space after it.
+  simdjson_warn_unused bool raw_json_ends_on_the_value() {
+    TEST_START();
+    const std::pair<std::string, std::string_view> documents[] = {
+      {"  [1,2]  \n", "[1,2]"},
+      {" {\"a\" : 1}\n\n", "{\"a\" : 1}"},
+      {" 42 ", "42"},
+      {"-1.5e3\t", "-1.5e3"},
+      {" true\r\n", "true"},
+      {" \"str ing\"  ", "\"str ing\""},
+      {"\"a\\\"b\" ", "\"a\\\"b\""},
+      {"\"c\\\\\" ", "\"c\\\\\""},
+    };
+    for (const auto &d : documents) {
+      ondemand::parser parser;
+      padded_string json(d.first);
+      std::string_view raw;
+      ASSERT_SUCCESS(parser.iterate(json).raw_json().get(raw));
+      ASSERT_EQUAL(raw, d.second);
+    }
+    auto json = R"([ [1] , {"a":1}
+, [ ] ,{ } ])"_padded;
+    const std::string_view expected[] = {"[1]", "{\"a\":1}", "[ ]", "{ }"};
+    ondemand::parser parser;
+    ondemand::document doc;
+    ASSERT_SUCCESS(parser.iterate(json).get(doc));
+    size_t i = 0;
+    for (auto element : doc) {
+      std::string_view raw;
+      ASSERT_SUCCESS(element.raw_json().get(raw));
+      ASSERT_TRUE(i < 4);
+      ASSERT_EQUAL(raw, expected[i]);
+      i++;
+    }
+    ASSERT_EQUAL(i, 4);
+    TEST_SUCCEED();
+  }
+
   simdjson_warn_unused bool big_integer() {
     TEST_START();
     simdjson::ondemand::parser parser;
@@ -520,7 +727,7 @@ namespace misc_tests {
     string_view token;
     ASSERT_SUCCESS(o["value"].raw_json_token().get(token));
     ASSERT_EQUAL(token, "12321323213213213213213213213211223");
-    return true;
+    TEST_SUCCEED();
   }
   simdjson_warn_unused bool big_integer_in_string() {
     TEST_START();
@@ -533,12 +740,12 @@ namespace misc_tests {
     string_view token;
     ASSERT_SUCCESS(o["value"].raw_json_token().get(token));
     ASSERT_EQUAL(token, "\"12321323213213213213213213213211223\"");
-    return true;
+    TEST_SUCCEED();
   }
   simdjson_warn_unused bool test_raw_json_token(string_view json, string_view expected_token, int expected_start_index = 0) {
     string title("'");
     title.append(json.data(), json.length());
-    title += std::string("'");
+    title += "'"s;
     padded_string json_padded = json;
     SUBTEST(title, test_ondemand_doc(json_padded, [&](auto doc) {
       string_view token;
@@ -546,17 +753,17 @@ namespace misc_tests {
       ASSERT_EQUAL( token, expected_token );
       // Validate the text is inside the original buffer
       ASSERT_EQUAL( reinterpret_cast<const void*>(token.data()), reinterpret_cast<const void*>(&json_padded.data()[expected_start_index]));
-      return true;
+      TEST_SUCCEED();
     }));
 
     // Test values
     auto json_in_hash = string(R"({"a":)");
     json_in_hash.append(json.data(), json.length());
-    json_in_hash += std::string("}");
+    json_in_hash += "}"s;
     json_padded = json_in_hash;
-    title = std::string("'");
+    title = "'"s;
     title.append(json_in_hash.data(), json_in_hash.length());
-    title += std::string("'");
+    title += "'"s;
     SUBTEST(title, test_ondemand_doc(json_padded, [&](auto doc) {
       string_view token;
       ASSERT_SUCCESS( doc["a"].raw_json_token().get(token) );
@@ -564,10 +771,9 @@ namespace misc_tests {
       // Validate the text is inside the original buffer
       // Adjust for the {"a":
       ASSERT_EQUAL( reinterpret_cast<const void*>(token.data()), reinterpret_cast<const void*>(&json_padded.data()[5+expected_start_index]));
-      return true;
+      TEST_SUCCEED();
     }));
-
-    return true;
+    TEST_SUCCEED();
   }
 
   bool raw_json_token() {
@@ -593,8 +799,18 @@ namespace misc_tests {
 
   bool run() {
     return
+           issue2355() &&
+           issue2354() &&
+           issue2322() &&
+           issue2312() &&
+#if SIMDJSON_EXCEPTIONS
+           issue2199() &&
+#endif
+           skipbom() &&
+           scalar_getters_on_root_container_value() &&
            issue1981_success() &&
            issue1981_failure() &&
+           root_bool_rejects_invalid_fifth_char() &&
            replacement_char() &&
            wobbly_tests() &&
            issue_uffff() &&
@@ -620,6 +836,7 @@ namespace misc_tests {
            big_integer_in_string() &&
            big_integer() &&
            raw_json_token() &&
+           raw_json_ends_on_the_value() &&
            doc_ref() &&
            true;
   }

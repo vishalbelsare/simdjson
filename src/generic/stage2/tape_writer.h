@@ -1,3 +1,13 @@
+#ifndef SIMDJSON_SRC_GENERIC_STAGE2_TAPE_WRITER_H
+
+#ifndef SIMDJSON_CONDITIONAL_INCLUDE
+#define SIMDJSON_SRC_GENERIC_STAGE2_TAPE_WRITER_H
+#include <generic/stage2/base.h>
+#include <simdjson/internal/tape_type.h>
+#endif // SIMDJSON_CONDITIONAL_INCLUDE
+
+#include <cstring>
+
 namespace simdjson {
 namespace SIMDJSON_IMPLEMENTATION {
 namespace {
@@ -15,6 +25,9 @@ struct tape_writer {
 
   /** Write a double value to tape. */
   simdjson_inline void append_double(double value) noexcept;
+
+  /** Write a big integer (as string) to tape. src points to first digit, len is byte count. */
+  simdjson_inline void append_bigint(const uint8_t *src, size_t len, uint8_t *&string_buf) noexcept;
 
   /**
    * Append a tape entry (an 8-bit type,and 56 bits worth of value).
@@ -53,7 +66,7 @@ private:
    */
   template<typename T>
   simdjson_inline void append2(uint64_t val, T val2, internal::tape_type t) noexcept;
-}; // struct number_writer
+}; // struct tape_writer
 
 simdjson_inline void tape_writer::append_s64(int64_t value) noexcept {
   append2(0, value, internal::tape_type::INT64);
@@ -99,7 +112,21 @@ simdjson_inline void tape_writer::write(uint64_t &tape_loc, uint64_t val, intern
   tape_loc = val | ((uint64_t(char(t))) << 56);
 }
 
+simdjson_inline void tape_writer::append_bigint(const uint8_t *src, size_t len, uint8_t *&string_buf) noexcept {
+  // Write to string buffer: [4-byte LE length][digits][null]
+  uint32_t str_len = uint32_t(len);
+  memcpy(string_buf, &str_len, sizeof(uint32_t));
+  memcpy(string_buf + sizeof(uint32_t), src, len);
+  string_buf[sizeof(uint32_t) + len] = 0;
+  // Tape entry: offset into string buffer
+  // The caller must set the offset relative to doc.string_buf base
+  append(0, internal::tape_type::BIGINT); // placeholder offset, caller patches
+  string_buf += sizeof(uint32_t) + len + 1;
+}
+
 } // namespace stage2
 } // unnamed namespace
 } // namespace SIMDJSON_IMPLEMENTATION
 } // namespace simdjson
+
+#endif // SIMDJSON_SRC_GENERIC_STAGE2_TAPE_WRITER_H

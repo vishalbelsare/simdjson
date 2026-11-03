@@ -2,15 +2,37 @@
 #define SIMDJSON_COMMON_DEFS_H
 
 #include <cassert>
+#include "simdjson/compiler_check.h"
 #include "simdjson/portability.h"
+#include <cstddef>
 
 namespace simdjson {
-
 namespace internal {
+/**
+ * @private
+ * Scratch capacity that every caller of to_chars must provide.
+ *
+ * The emitted decimal is at most ~24 characters, but dragonbox() and
+ * format_buffer() intentionally write past the logical end with fixed-size
+ * 16/17-byte memcpy/memset operations so the compiler can inline them (no
+ * libc mem* dispatch with size-class branches). The extra bytes are required
+ * for safety of those over-writes; do not shrink this below 40.
+ * See src/to_chars.cpp and #2805.
+ */
+// Use an unscoped enum (not static constexpr / inline constexpr):
+// - C++11 targets (readme_examples11, quickstart11, ...) still include this header
+// - a static constexpr in the amalgamated simdjson.cpp TU is unused there
+//   (only callers in headers use it) and trips -Wunused-const-variable -Werror
+enum : size_t { to_chars_buffer_size = 40 };
 /**
  * @private
  * Our own implementation of the C++17 to_chars function.
  * Defined in src/to_chars
+ *
+ * @note The buffer starting at first must have at least to_chars_buffer_size
+ *       bytes of writable storage (see to_chars_buffer_size).
+ * @note The input number must be finite (NaN/Inf are not supported).
+ * @note The result is NOT null-terminated.
  */
 char *to_chars(char *first, const char *last, double value);
 /**
@@ -20,36 +42,25 @@ char *to_chars(char *first, const char *last, double value);
  */
 double from_chars(const char *first) noexcept;
 double from_chars(const char *first, const char* end) noexcept;
-
+/**
+ * @private
+ * Same as from_chars, but produces a correctly rounded binary32 (float) value.
+ * Defined in src/from_chars
+ */
+float from_chars_float(const char *first) noexcept;
 }
 
 #ifndef SIMDJSON_EXCEPTIONS
-#if __cpp_exceptions
+#if defined(__cpp_exceptions) || defined(_CPPUNWIND)
 #define SIMDJSON_EXCEPTIONS 1
 #else
 #define SIMDJSON_EXCEPTIONS 0
 #endif
 #endif
 
-/** The maximum document size supported by simdjson. */
-constexpr size_t SIMDJSON_MAXSIZE_BYTES = 0xFFFFFFFF;
-
-/**
- * The amount of padding needed in a buffer to parse JSON.
- *
- * The input buf should be readable up to buf + SIMDJSON_PADDING
- * this is a stopgap; there should be a better description of the
- * main loop and its behavior that abstracts over this
- * See https://github.com/simdjson/simdjson/issues/174
- */
-constexpr size_t SIMDJSON_PADDING = 64;
-
-/**
- * By default, simdjson supports this many nested objects and arrays.
- *
- * This is the default for parser::max_depth().
- */
-constexpr size_t DEFAULT_MAX_DEPTH = 1024;
+#ifndef SIMDJSON_ENABLE_NAN_INF
+#define SIMDJSON_ENABLE_NAN_INF 0
+#endif
 
 } // namespace simdjson
 
@@ -66,14 +77,14 @@ constexpr size_t DEFAULT_MAX_DEPTH = 1024;
 
 // Align to N-byte boundary
 #define SIMDJSON_ROUNDUP_N(a, n) (((a) + ((n)-1)) & ~((n)-1))
-#define SIMDJSON_ROUNDDOWN_N(a, n) ((a) & ~((n)-1))
-
-#define SIMDJSON_ISALIGNED_N(ptr, n) (((uintptr_t)(ptr) & ((n)-1)) == 0)
 
 #if SIMDJSON_REGULAR_VISUAL_STUDIO
+  // We could use [[deprecated]] but it requires C++14
+  #define simdjson_deprecated __declspec(deprecated)
 
   #define simdjson_really_inline __forceinline
-  #define simdjson_never_inline __declspec(noinline)
+  #define simdjson_never_inline inline __declspec(noinline)
+  #define simdjson_really_flatten [[msvc::flatten]]
 
   #define simdjson_unused
   #define simdjson_warn_unused
@@ -105,10 +116,16 @@ constexpr size_t DEFAULT_MAX_DEPTH = 1024;
   #define SIMDJSON_DISABLE_STRICT_OVERFLOW_WARNING
   #define SIMDJSON_POP_DISABLE_WARNINGS __pragma(warning( pop ))
 
+  #define SIMDJSON_PUSH_DISABLE_UNUSED_WARNINGS
+  #define SIMDJSON_POP_DISABLE_UNUSED_WARNINGS
+
 #else // SIMDJSON_REGULAR_VISUAL_STUDIO
+  // We could use [[deprecated]] but it requires C++14
+  #define simdjson_deprecated __attribute__((deprecated))
 
   #define simdjson_really_inline inline __attribute__((always_inline))
   #define simdjson_never_inline inline __attribute__((noinline))
+  #define simdjson_really_flatten [[gnu::flatten]]
 
   #define simdjson_unused __attribute__((unused))
   #define simdjson_warn_unused __attribute__((warn_unused_result))
@@ -150,7 +167,8 @@ constexpr size_t DEFAULT_MAX_DEPTH = 1024;
     SIMDJSON_DISABLE_GCC_WARNING(-Wshadow) \
     SIMDJSON_DISABLE_GCC_WARNING(-Wunused-parameter) \
     SIMDJSON_DISABLE_GCC_WARNING(-Wunused-variable) \
-    SIMDJSON_DISABLE_GCC_WARNING(-Wmaybe-uninitialized)
+    SIMDJSON_DISABLE_GCC_WARNING(-Wmaybe-uninitialized) \
+    SIMDJSON_DISABLE_GCC_WARNING(-Wformat-security)
   #endif // __clang__
 
   #define SIMDJSON_PRAGMA(P) _Pragma(#P)
@@ -163,6 +181,10 @@ constexpr size_t DEFAULT_MAX_DEPTH = 1024;
   #define SIMDJSON_DISABLE_DEPRECATED_WARNING SIMDJSON_DISABLE_GCC_WARNING(-Wdeprecated-declarations)
   #define SIMDJSON_DISABLE_STRICT_OVERFLOW_WARNING SIMDJSON_DISABLE_GCC_WARNING(-Wstrict-overflow)
   #define SIMDJSON_POP_DISABLE_WARNINGS _Pragma("GCC diagnostic pop")
+
+  #define SIMDJSON_PUSH_DISABLE_UNUSED_WARNINGS SIMDJSON_PUSH_DISABLE_WARNINGS \
+    SIMDJSON_DISABLE_GCC_WARNING(-Wunused)
+  #define SIMDJSON_POP_DISABLE_UNUSED_WARNINGS SIMDJSON_POP_DISABLE_WARNINGS
 
 
 
@@ -178,6 +200,15 @@ constexpr size_t DEFAULT_MAX_DEPTH = 1024;
 #else
   // Force inlining for most simdjson functions.
   #define simdjson_inline simdjson_really_inline
+#endif
+
+#if defined(simdjson_flatten)
+  // Prefer the user's definition of simdjson_flatten; don't define it ourselves.
+#elif (defined(__GNUC__) && !defined(__OPTIMIZE__)) || (defined(_DEBUG) && _MSC_VER )
+  // Flattening can lead to significant code bloat and high compile times. Don't use it for unoptimized builds.
+  #define simdjson_flatten
+#else
+  #define simdjson_flatten simdjson_really_flatten
 #endif
 
 #if SIMDJSON_VISUAL_STUDIO
@@ -208,17 +239,6 @@ constexpr size_t DEFAULT_MAX_DEPTH = 1024;
     // We assume by default static linkage
     #define SIMDJSON_DLLIMPORTEXPORT
     #endif
-
-/**
- * Workaround for the vcpkg package manager. Only vcpkg should
- * ever touch the next line. The SIMDJSON_USING_LIBRARY macro is otherwise unused.
- */
-#if SIMDJSON_USING_LIBRARY
-#define SIMDJSON_DLLIMPORTEXPORT __declspec(dllimport)
-#endif
-/**
- * End of workaround for the vcpkg package manager.
- */
 #else
     #define SIMDJSON_DLLIMPORTEXPORT
 #endif
@@ -235,12 +255,14 @@ constexpr size_t DEFAULT_MAX_DEPTH = 1024;
 // even if we do not have C++17 support.
 #ifdef __cpp_lib_string_view
 #define SIMDJSON_HAS_STRING_VIEW
+#include <string_view>
 #endif
 
 // Some systems have string_view even if we do not have C++17 support,
 // and even if __cpp_lib_string_view is undefined, it is the case
 // with Apple clang version 11.
 // We must handle it. *This is important.*
+#ifndef _MSC_VER
 #ifndef SIMDJSON_HAS_STRING_VIEW
 #if defined __has_include
 // do not combine the next #if with the previous one (unsafe)
@@ -256,6 +278,7 @@ constexpr size_t DEFAULT_MAX_DEPTH = 1024;
 #endif // __has_include (<string_view>)
 #endif // defined __has_include
 #endif // def SIMDJSON_HAS_STRING_VIEW
+#endif // def _MSC_VER
 // end of complicated but important routine to try to detect string_view.
 
 //
@@ -288,16 +311,27 @@ namespace std {
 // It could also wrongly set SIMDJSON_DEVELOPMENT_CHECKS (e.g., if the programmer
 // sets _DEBUG in a release build under Visual Studio, or if some compiler fails to
 // set the __OPTIMIZE__ macro).
+// We make it so that if NDEBUG is defined, then SIMDJSON_DEVELOPMENT_CHECKS
+// is not defined, irrespective of the compiler.
+// We recommend that users set NDEBUG in release builds, so that
+// SIMDJSON_DEVELOPMENT_CHECKS is not defined in release builds by default,
+// irrespective of the compiler.
 #ifndef SIMDJSON_DEVELOPMENT_CHECKS
 #ifdef _MSC_VER
 // Visual Studio seems to set _DEBUG for debug builds.
-#ifdef _DEBUG
+// We set SIMDJSON_DEVELOPMENT_CHECKS to 1 if _DEBUG is defined
+// and NDEBUG is not defined.
+#if defined(_DEBUG) && !defined(NDEBUG)
 #define SIMDJSON_DEVELOPMENT_CHECKS 1
 #endif // _DEBUG
 #else // _MSC_VER
 // All other compilers appear to set __OPTIMIZE__ to a positive integer
 // when the compiler is optimizing.
-#ifndef __OPTIMIZE__
+// We only set SIMDJSON_DEVELOPMENT_CHECKS if both __OPTIMIZE__
+// and NDEBUG are not defined.
+// We recognize _DEBUG as overriding __OPTIMIZE__ so that if both
+// __OPTIMIZE__ and _DEBUG are defined, we still set SIMDJSON_DEVELOPMENT_CHECKS.
+#if ((!defined(__OPTIMIZE__) || defined(_DEBUG)) && !defined(NDEBUG))
 #define SIMDJSON_DEVELOPMENT_CHECKS 1
 #endif // __OPTIMIZE__
 #endif // _MSC_VER
@@ -322,7 +356,6 @@ namespace std {
 # define simdjson_fallthrough do {} while (0)  /* fallthrough */
 #endif // simdjson_fallthrough
 
-
 #if SIMDJSON_DEVELOPMENT_CHECKS
 #define SIMDJSON_DEVELOPMENT_ASSERT(expr) do { assert ((expr)); } while (0)
 #else
@@ -333,4 +366,37 @@ namespace std {
 #define SIMDJSON_UTF8VALIDATION 1
 #endif
 
+#ifdef __has_include
+// How do we detect that a compiler supports vbmi2?
+// For sure if the following header is found, we are ok?
+#if __has_include(<avx512vbmi2intrin.h>)
+#define SIMDJSON_COMPILER_SUPPORTS_VBMI2 1
+#endif
+#endif
+
+#ifdef _MSC_VER
+#if _MSC_VER >= 1920
+// Visual Studio 2019 and up support VBMI2 under x64 even if the header
+// avx512vbmi2intrin.h is not found.
+#define SIMDJSON_COMPILER_SUPPORTS_VBMI2 1
+#endif
+#endif
+
+// By default, we allow AVX512.
+#ifndef SIMDJSON_AVX512_ALLOWED
+#define SIMDJSON_AVX512_ALLOWED 1
+#endif
+
+
+#ifndef __has_cpp_attribute
+#define simdjson_lifetime_bound
+#elif __has_cpp_attribute(msvc::lifetimebound)
+#define simdjson_lifetime_bound [[msvc::lifetimebound]]
+#elif __has_cpp_attribute(clang::lifetimebound)
+#define simdjson_lifetime_bound [[clang::lifetimebound]]
+#elif __has_cpp_attribute(lifetimebound)
+#define simdjson_lifetime_bound [[lifetimebound]]
+#else
+#define simdjson_lifetime_bound
+#endif
 #endif // SIMDJSON_COMMON_DEFS_H

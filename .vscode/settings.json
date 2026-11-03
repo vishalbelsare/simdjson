@@ -3,8 +3,12 @@
         {"column": 95 },
         {"column": 120 }
     ],
+    "cmake.configureArgs": [
+        "-DSIMDJSON_DEVELOPER_MODE=ON"
+    ],
     "files.trimTrailingWhitespace": true,
     "files.associations": {
+        ".clangd": "yaml",
         "array": "cpp",
         "iterator": "cpp",
         "chrono": "cpp",
@@ -97,6 +101,34 @@
         "queue": "cpp",
         "shared_mutex": "cpp",
         "ranges": "cpp",
-        "span": "cpp"
+        "span": "cpp",
+        "__verbose_abort": "cpp",
+        "charconv": "cpp",
+        "source_location": "cpp",
+        "strstream": "cpp",
+        "typeindex": "cpp",
+        "*.tcc": "cpp",
+        "memory_resource": "cpp",
+        "numbers": "cpp",
+        "semaphore": "cpp",
+        "stop_token": "cpp",
+        "cfenv": "cpp",
+        "format": "cpp",
+        "xlocmes": "cpp",
+        "xlocmon": "cpp",
+        "xlocnum": "cpp",
+        "xloctime": "cpp",
+        "xutility": "cpp",
+        "coroutine": "cpp",
+        "xfacet": "cpp",
+        "xhash": "cpp",
+        "xiosbase": "cpp",
+        "xlocale": "cpp",
+        "xlocbuf": "cpp",
+        "xlocinfo": "cpp",
+        "xmemory": "cpp",
+        "xstring": "cpp",
+        "xtr1common": "cpp",
+        "xtree": "cpp"
     }
 }
